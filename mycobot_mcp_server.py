@@ -460,12 +460,29 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResu
         elif name == "get_robot_status":
             result = await get_robot_status()
         else:
+            # Create proper error TextContent for unknown tool
+            unknown_tool_content = TextContent(
+                type="text",
+                text=f"Unknown tool: {name}",
+                annotations=None
+            )
             return CallToolResult(
-                content=[TextContent(type="text", text=f"Unknown tool: {name}")],
-                isError=True
+                content=[unknown_tool_content],
+                isError=True,
+                meta=None
             )
         
-        return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, indent=2))])
+        # Create proper TextContent object with all required fields
+        text_content = TextContent(
+            type="text",
+            text=json.dumps(result, indent=2),
+            annotations=None
+        )
+        return CallToolResult(
+            content=[text_content],
+            isError=False,
+            meta=None
+        )
     
     except Exception as e:
         error_result = {
@@ -473,9 +490,16 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResu
             "tool": name,
             "arguments": arguments
         }
+        # Create proper error TextContent object
+        error_text_content = TextContent(
+            type="text", 
+            text=json.dumps(error_result, indent=2),
+            annotations=None
+        )
         return CallToolResult(
-            content=[TextContent(type="text", text=json.dumps(error_result, indent=2))],
-            isError=True
+            content=[error_text_content],
+            isError=True,
+            meta=None
         )
 
 
@@ -528,7 +552,11 @@ Robot Movement State: {"Moving" if status['is_moving'] else "Stationary"}
             messages=[
                 PromptMessage(
                     role="user",
-                    content=TextContent(type="text", text=prompt_text)
+                    content=TextContent(
+                        type="text", 
+                        text=prompt_text,
+                        annotations=None
+                    )
                 )
             ]
         )
@@ -553,7 +581,11 @@ Home Position: All joints at 0°
             messages=[
                 PromptMessage(
                     role="user",
-                    content=TextContent(type="text", text=prompt_text)
+                    content=TextContent(
+                        type="text", 
+                        text=prompt_text,
+                        annotations=None
+                    )
                 )
             ]
         )
@@ -590,7 +622,11 @@ Always check robot status before and after movements for safety.
             messages=[
                 PromptMessage(
                     role="user",
-                    content=TextContent(type="text", text=prompt_text)
+                    content=TextContent(
+                        type="text", 
+                        text=prompt_text,
+                        annotations=None
+                    )
                 )
             ]
         )
