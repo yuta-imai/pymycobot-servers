@@ -63,15 +63,19 @@ async def get_joint_angle(joint_num: int) -> Dict[str, Any]:
     if not (1 <= joint_num <= 6):
         raise ValueError(f"Joint number must be between 1-6, got {joint_num}")
     
-    async with api_session.get(f"{api_base_url}/joints/{joint_num}/angle") as response:
+    # Use get_all_joint_angles and extract the specific joint
+    # because the single joint API endpoint has issues
+    async with api_session.get(f"{api_base_url}/joints/angles") as response:
         if response.status != 200:
             error_text = await response.text()
             raise RuntimeError(f"API request failed: {response.status} - {error_text}")
         
         data = await response.json()
+        angles = data["angles"]
+        
         return {
             "joint_num": joint_num,
-            "angle": data["angle"],
+            "angle": angles[joint_num - 1],  # Convert to 0-based index
             "unit": "degrees"
         }
 
@@ -456,7 +460,10 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResu
         elif name == "get_robot_status":
             result = await get_robot_status()
         else:
-            raise ValueError(f"Unknown tool: {name}")
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Unknown tool: {name}")],
+                isError=True
+            )
         
         return CallToolResult(content=[TextContent(type="text", text=json.dumps(result, indent=2))])
     
@@ -466,7 +473,10 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResu
             "tool": name,
             "arguments": arguments
         }
-        return CallToolResult(content=[TextContent(type="text", text=json.dumps(error_result, indent=2))])
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(error_result, indent=2))],
+            isError=True
+        )
 
 
 @server.list_prompts()
