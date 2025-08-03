@@ -1,0 +1,525 @@
+openapi: 3.0.3
+info:
+  title: MyCobot Joint Controller REST API
+  description: REST API for controlling MyCobot robot joints remotely
+  version: 1.0.0
+  contact:
+    name: MyCobot API
+    url: https://github.com/elephantrobotics/pymycobot
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: http://0.0.0.0:8080
+    description: External access server
+
+tags:
+  - name: joints
+    description: Individual joint operations
+  - name: robot
+    description: Overall robot operations
+  - name: system
+    description: System status and control
+
+paths:
+  /health:
+    get:
+      tags:
+        - system
+      summary: Health check
+      description: Check if the API server and robot connection are healthy
+      operationId: health_check
+      responses:
+        '200':
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /joints/{joint_num}/angle:
+    get:
+      tags:
+        - joints
+      summary: Get joint angle
+      description: Get current angle of a specific joint
+      operationId: get_joint_angle
+      parameters:
+        - name: joint_num
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 6
+          description: Joint number (1-6)
+      responses:
+        '200':
+          description: Current joint angle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JointAngleResponse'
+        '400':
+          description: Invalid joint number
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags:
+        - joints
+      summary: Move joint to angle
+      description: Move a specific joint to target angle
+      operationId: move_joint
+      parameters:
+        - name: joint_num
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 6
+          description: Joint number (1-6)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveJointRequest'
+      responses:
+        '200':
+          description: Joint movement command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /joints/angles:
+    get:
+      tags:
+        - joints
+      summary: Get all joint angles
+      description: Get current angles of all joints
+      operationId: get_all_joint_angles
+      responses:
+        '200':
+          description: Current angles of all joints
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AllJointAnglesResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      tags:
+        - joints
+      summary: Move all joints
+      description: Move all joints to specified angles simultaneously
+      operationId: move_all_joints
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveAllJointsRequest'
+      responses:
+        '200':
+          description: All joints movement command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /joints/{joint_num}/jog:
+    post:
+      tags:
+        - joints
+      summary: Jog joint
+      description: Jog a joint in specified direction
+      operationId: jog_joint
+      parameters:
+        - name: joint_num
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 6
+          description: Joint number (1-6)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JogJointRequest'
+      responses:
+        '200':
+          description: Joint jog command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /robot/home:
+    post:
+      tags:
+        - robot
+      summary: Move to home position
+      description: Move all joints to home position (0 degrees)
+      operationId: home_position
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeedRequest'
+      responses:
+        '200':
+          description: Home position command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /robot/stop:
+    post:
+      tags:
+        - robot
+      summary: Stop all joints
+      description: Emergency stop for all joint movements
+      operationId: stop_all_joints
+      responses:
+        '200':
+          description: Stop command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /robot/status:
+    get:
+      tags:
+        - robot
+      summary: Get robot status
+      description: Get current robot status including joint angles and movement state
+      operationId: get_robot_status
+      responses:
+        '200':
+          description: Current robot status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RobotStatusResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /robot/wait:
+    post:
+      tags:
+        - robot
+      summary: Wait for movement completion
+      description: Wait for robot to complete current movement
+      operationId: wait_for_completion
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WaitRequest'
+      responses:
+        '200':
+          description: Movement completed or timeout reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WaitResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "healthy"
+        robot_connected:
+          type: boolean
+          example: true
+        api_version:
+          type: string
+          example: "1.0.0"
+      required:
+        - status
+        - robot_connected
+        - api_version
+
+    JointAngleResponse:
+      type: object
+      properties:
+        joint_num:
+          type: integer
+          minimum: 1
+          maximum: 6
+          example: 1
+        angle:
+          type: number
+          format: float
+          example: 45.5
+        timestamp:
+          type: string
+          format: date-time
+          example: "2023-12-01T12:00:00Z"
+      required:
+        - joint_num
+        - angle
+        - timestamp
+
+    AllJointAnglesResponse:
+      type: object
+      properties:
+        angles:
+          type: array
+          items:
+            type: number
+            format: float
+          minItems: 6
+          maxItems: 6
+          example: [0.0, 45.5, -30.2, 90.0, -15.5, 60.0]
+        timestamp:
+          type: string
+          format: date-time
+          example: "2023-12-01T12:00:00Z"
+      required:
+        - angles
+        - timestamp
+
+    RobotStatusResponse:
+      type: object
+      properties:
+        joint_angles:
+          type: array
+          items:
+            type: number
+            format: float
+          minItems: 6
+          maxItems: 6
+          example: [0.0, 45.5, -30.2, 90.0, -15.5, 60.0]
+        is_moving:
+          type: boolean
+          example: false
+        timestamp:
+          type: string
+          format: date-time
+          example: "2023-12-01T12:00:00Z"
+      required:
+        - joint_angles
+        - is_moving
+        - timestamp
+
+    MoveJointRequest:
+      type: object
+      properties:
+        angle:
+          type: number
+          format: float
+          minimum: -175
+          maximum: 175
+          example: 45.5
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          example: 50
+      required:
+        - angle
+
+    MoveAllJointsRequest:
+      type: object
+      properties:
+        angles:
+          type: array
+          items:
+            type: number
+            format: float
+            minimum: -175
+            maximum: 175
+          minItems: 6
+          maxItems: 6
+          example: [0.0, 45.5, -30.2, 90.0, -15.5, 60.0]
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          example: 50
+      required:
+        - angles
+
+    JogJointRequest:
+      type: object
+      properties:
+        direction:
+          type: integer
+          enum: [-1, 1]
+          example: 1
+          description: "1 for positive direction, -1 for negative direction"
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          example: 50
+      required:
+        - direction
+
+    SpeedRequest:
+      type: object
+      properties:
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          example: 50
+
+    WaitRequest:
+      type: object
+      properties:
+        timeout:
+          type: number
+          format: float
+          minimum: 0.1
+          maximum: 60.0
+          default: 10.0
+          example: 10.0
+          description: "Maximum time to wait in seconds"
+
+    WaitResponse:
+      type: object
+      properties:
+        completed:
+          type: boolean
+          example: true
+          description: "True if movement completed, False if timeout"
+        elapsed_time:
+          type: number
+          format: float
+          example: 2.5
+          description: "Actual time elapsed in seconds"
+      required:
+        - completed
+        - elapsed_time
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Command executed successfully"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2023-12-01T12:00:00Z"
+      required:
+        - success
+        - message
+        - timestamp
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "Invalid joint number"
+        message:
+          type: string
+          example: "Joint number must be between 1-6, got 7"
+        timestamp:
+          type: string
+          format: date-time
+          example: "2023-12-01T12:00:00Z"
+      required:
+        - error
+        - message
+        - timestamp

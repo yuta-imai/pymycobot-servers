@@ -1,0 +1,108 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This is a robotics project focused on MyCobot arm control and camera streaming using Python. The project includes comprehensive joint control functionality for the MyCobot robot and RTSP streaming capabilities for Raspberry Pi camera modules.
+
+## Project Structure
+
+```
+/home/factory/arms/
+├── package.json                    # Node.js dependencies (Claude Code)
+├── package-lock.json              # NPM lockfile
+├── requirements.txt                # Python dependencies
+├── mycobot_joint_controller.py    # Main MyCobot joint control module
+├── rtsp_camera_server.py          # RTSP camera streaming server
+├── mycobot_api_spec.yaml          # OpenAPI specification for REST API
+├── mycobot_api_server.py          # REST API server (FastAPI)
+├── mycobot_mcp_server.py          # MCP server for external control
+└── node_modules/                  # Node.js dependencies
+```
+
+## Development Commands
+
+### Python Development
+- Install dependencies: `pip install -r requirements.txt`
+- Run the joint controller example: `python mycobot_joint_controller.py`
+- Run the RTSP camera server: `python rtsp_camera_server.py`
+  - With custom frame rate: `python rtsp_camera_server.py --fps 15`
+  - With custom resolution: `python rtsp_camera_server.py --width 1280 --height 720 --fps 10`
+  - For external access (default): `python rtsp_camera_server.py --bind-address 0.0.0.0`
+  - For local access only: `python rtsp_camera_server.py --bind-address 127.0.0.1`
+  - View all options: `python rtsp_camera_server.py --help`
+- Run the REST API server: `python mycobot_api_server.py`
+  - With custom host/port: `python mycobot_api_server.py --host 0.0.0.0 --port 8080`
+  - API docs available at: `http://localhost:8080/docs`
+  - View all options: `python mycobot_api_server.py --help`
+- Run the MCP server: `python mycobot_mcp_server.py`
+  - With custom robot port: `python mycobot_mcp_server.py --robot-port /dev/ttyUSB0`
+- Import modules:
+  - `from mycobot_joint_controller import MyCobotJointController`
+  - `from rtsp_camera_server import RTSPCameraServer`
+
+### System Dependencies
+- **FFmpeg**: Required for RTSP streaming: `sudo apt install ffmpeg`
+- **GStreamer** (optional): Alternative streaming backend: `sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-good`
+
+## Architecture
+
+### MyCobot Joint Controller (`mycobot_joint_controller.py`)
+- **MyCobotJointController**: Main controller class for robot joint operations
+- **Individual Joint Functions**: `move_joint_1()` through `move_joint_6()` for specific joint control
+- **Utility Functions**: Joint validation, angle limits, movement completion detection
+- **Safety Features**: Angle validation, joint limits enforcement, emergency stop functionality
+
+### RTSP Camera Server (`rtsp_camera_server.py`)
+- **RTSPCameraServer**: Main streaming server class using FFmpeg backend
+- **SimpleRTSPServer**: Alternative implementation using GStreamer
+- **Camera Control**: Captures from `/dev/video0` with configurable resolution/FPS
+- **Stream Management**: Start/stop streaming with proper resource cleanup
+- **External Access**: Server binds to `0.0.0.0` by default for external network access
+
+### REST API Server (`mycobot_api_server.py`)
+- **FastAPI-based**: REST API server for remote robot control
+- **OpenAPI Compliance**: Follows specification in `mycobot_api_spec.yaml`
+- **External Access**: Serves on `0.0.0.0:8080` by default for network access
+- **Interactive Docs**: Swagger UI available at `/docs` endpoint
+- **CORS Enabled**: Supports cross-origin requests for web applications
+
+### MCP Server (`mycobot_mcp_server.py`)
+- **Model Context Protocol**: MCP server for external system integration
+- **Tool Interface**: Provides structured tools for robot control
+- **Prompt Support**: Built-in prompts for robot status and usage examples
+- **Async Operations**: Asynchronous tool execution for responsiveness
+
+### Key Features
+
+#### MyCobot Control
+- Individual joint control with angle validation
+- Simultaneous multi-joint movements
+- Joint jogging and incremental movements
+- Real-time angle reading
+- Movement completion detection
+- Safety limits and error handling
+
+#### Camera Streaming
+- RTSP streaming from Raspberry Pi camera module
+- Configurable resolution, FPS, and bitrate
+- H.264 encoding with low-latency tuning
+- Dual backend support (FFmpeg/GStreamer)
+- Stream URL: `rtsp://IP_ADDRESS:8554/camera`
+- External network access (binds to 0.0.0.0 by default)
+- Automatic resource management and cleanup
+
+#### Remote Control APIs
+- **REST API**: HTTP-based control with OpenAPI specification
+  - GET/PUT endpoints for joint control
+  - JSON request/response format
+  - Interactive documentation at `/docs`
+  - Health checks and status monitoring
+- **MCP Protocol**: Integration with external AI systems
+  - Structured tool definitions for robot control
+  - Built-in prompts for guidance and examples
+  - Asynchronous operation support
+
+## Memories
+- to memorize

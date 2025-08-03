@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(docker build:*)",
+      "Bash(sudo apt:*)",
+      "Bash(sudo apt install:*)",
+      "Bash(sudo systemctl start:*)",
+      "Bash(sudo usermod:*)",
+      "Bash(sudo docker build:*)"
+    ],
+    "deny": []
+  }
+}

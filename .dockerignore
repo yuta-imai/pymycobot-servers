@@ -1,0 +1,63 @@
+# Git files
+.git
+.gitignore
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# Virtual environments
+venv
+env
+ENV
+env.bak
+venv.bak
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Documentation
+README.md
+*.md
+
+# Other robot-related files not needed in MCP server
+mycobot_joint_controller.py
+mycobot_api_server.py
+rtsp_camera_server.py
+mycobot_api_spec.yaml
+
+# Node.js (not needed for MCP server)
+node_modules
+package.json
+package-lock.json
