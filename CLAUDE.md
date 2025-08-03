@@ -37,7 +37,10 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
   - API docs available at: `http://localhost:8080/docs`
   - View all options: `python mycobot_api_server.py --help`
 - Run the MCP server: `python mycobot_mcp_server.py`
-  - With custom robot port: `python mycobot_mcp_server.py --robot-port /dev/ttyUSB0`
+  - With STDIO transport (default): `python mycobot_mcp_server.py --transport stdio`
+  - With HTTP transport: `python mycobot_mcp_server.py --transport http --http-host 0.0.0.0 --http-port 8081`
+  - With custom API server: `python mycobot_mcp_server.py --api-host 192.168.1.100 --api-port 8080`
+  - View all options: `python mycobot_mcp_server.py --help`
 - Import modules:
   - `from mycobot_joint_controller import MyCobotJointController`
   - `from rtsp_camera_server import RTSPCameraServer`
@@ -70,9 +73,11 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 
 ### MCP Server (`mycobot_mcp_server.py`)
 - **Model Context Protocol**: MCP server for external system integration
+- **Dual Transport Support**: STDIO (pipe/stdin) and HTTP (SSE) transports
 - **Tool Interface**: Provides structured tools for robot control
 - **Prompt Support**: Built-in prompts for robot status and usage examples
 - **Async Operations**: Asynchronous tool execution for responsiveness
+- **HTTP Endpoints**: `/sse` for MCP communication, `/health` for status checks
 
 ### Key Features
 
@@ -100,9 +105,12 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
   - Interactive documentation at `/docs`
   - Health checks and status monitoring
 - **MCP Protocol**: Integration with external AI systems
+  - **STDIO Transport**: Traditional pipe-based communication for local applications
+  - **HTTP Transport**: Server-Sent Events (SSE) for web-based integration
   - Structured tool definitions for robot control
   - Built-in prompts for guidance and examples
   - Asynchronous operation support
+  - CORS-enabled HTTP server for browser compatibility
 
 ## Memories
 - to memorize

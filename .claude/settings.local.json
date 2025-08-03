@@ -7,7 +7,13 @@
       "Bash(sudo apt install:*)",
       "Bash(sudo systemctl start:*)",
       "Bash(sudo usermod:*)",
-      "Bash(sudo docker build:*)"
+      "Bash(sudo docker build:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(curl:*)",
+      "Bash(timeout 5 python:*)",
+      "Bash(pkill:*)",
+      "Bash(timeout:*)"
     ],
     "deny": []
   }

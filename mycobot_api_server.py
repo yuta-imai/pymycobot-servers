@@ -391,8 +391,8 @@ def main():
                        help='Host to bind server to (default: 0.0.0.0)')
     parser.add_argument('--port', type=int, default=8080,
                        help='Port to bind server to (default: 8080)')
-    parser.add_argument('--robot-port', type=str, default='/dev/ttyUSB0',
-                       help='Robot serial port (default: /dev/ttyUSB0)')
+    parser.add_argument('--robot-port', type=str, default='/dev/ttyACM0',
+                       help='Robot serial port (default: /dev/ttyACM0)')
     parser.add_argument('--robot-baudrate', type=int, default=115200,
                        help='Robot serial baudrate (default: 115200)')
     parser.add_argument('--reload', action='store_true',

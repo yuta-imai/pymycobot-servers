@@ -12,10 +12,12 @@ import sys
 from typing import Any, Dict, List, Optional, Union
 import argparse
 import aiohttp
+from aiohttp import web, web_request
 
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
+from mcp.server.sse import SseServerTransport
 from mcp.types import (
     CallToolRequest,
     CallToolResult,
@@ -35,6 +37,7 @@ from mcp.types import (
     ImageContent,
     EmbeddedResource
 )
+from mcp.server.lowlevel.server import NotificationOptions
 
 
 # Global API client session and base URL
@@ -586,13 +589,124 @@ Always check robot status before and after movements for safety.
         raise ValueError(f"Unknown prompt: {name}")
 
 
+async def run_stdio_server():
+    """Run the MCP server using STDIO transport."""
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="mycobot-controller",
+                    server_version="1.0.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={}
+                    )
+                )
+            )
+    except KeyboardInterrupt:
+        logger.info("Server interrupted by user")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        raise
+
+
+async def create_sse_transport(request: web_request.Request) -> web.Response:
+    """Create SSE transport for HTTP MCP connection."""
+    try:
+        transport = SseServerTransport("/message", request)
+        
+        async def _run_server():
+            await server.run(
+                transport,
+                InitializationOptions(
+                    server_name="mycobot-controller",
+                    server_version="1.0.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={}
+                    )
+                )
+            )
+        
+        # Start the server in a background task
+        asyncio.create_task(_run_server())
+        return await transport.start()
+    except Exception as e:
+        logger.error(f"SSE transport error: {e}")
+        return web.Response(status=500, text=f"Transport error: {e}")
+
+
+async def run_http_server(host: str = "localhost", port: int = 8081):
+    """Run the MCP server using HTTP transport."""
+    app = web.Application()
+    
+    # Add CORS headers
+    async def add_cors_headers(request, handler):
+        try:
+            response = await handler(request)
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            return response
+        except Exception as e:
+            logger.error(f"CORS middleware error: {e}")
+            return web.Response(status=500, text=f"Middleware error: {e}")
+    
+    app.middlewares.append(add_cors_headers)
+    
+    # SSE endpoint for MCP communication
+    app.router.add_get("/sse", create_sse_transport)
+    
+    # Options handler for CORS preflight
+    async def options_handler(request):
+        return web.Response(
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type"
+            }
+        )
+    
+    app.router.add_options("/sse", options_handler)
+    
+    # Health check endpoint
+    async def health_handler(request):
+        return web.json_response({"status": "healthy", "transport": "http"})
+    
+    app.router.add_get("/health", health_handler)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+    
+    logger.info(f"HTTP MCP server started on {host}:{port}")
+    logger.info(f"SSE endpoint: http://{host}:{port}/sse")
+    logger.info(f"Health check: http://{host}:{port}/health")
+    
+    try:
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        logger.info("HTTP server interrupted by user")
+    finally:
+        await runner.cleanup()
+
+
 async def main():
     """Main function to run the MCP server."""
     parser = argparse.ArgumentParser(description='MyCobot MCP Server')
     parser.add_argument('--api-host', type=str, default='localhost',
-                       help='API server host (default: localhost)')
+                       help='MyCobot API server host (default: localhost)')
     parser.add_argument('--api-port', type=int, default=8080,
-                       help='API server port (default: 8080)')
+                       help='MyCobot API server port (default: 8080)')
+    parser.add_argument('--transport', type=str, choices=['stdio', 'http'], default='stdio',
+                       help='Transport protocol: stdio or http (default: stdio)')
+    parser.add_argument('--http-host', type=str, default='localhost',
+                       help='HTTP server host for http transport (default: localhost)')
+    parser.add_argument('--http-port', type=int, default=8081,
+                       help='HTTP server port for http transport (default: 8081)')
     
     args = parser.parse_args()
     
@@ -618,24 +732,12 @@ async def main():
         sys.exit(1)
     
     try:
-        # Run MCP server
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="mycobot-controller",
-                    server_version="1.0.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=None,
-                        experimental_capabilities={}
-                    )
-                )
-            )
-    except KeyboardInterrupt:
-        logger.info("Server interrupted by user")
-    except Exception as e:
-        logger.error(f"Server error: {e}")
+        if args.transport == 'stdio':
+            logger.info("Starting MCP server with STDIO transport")
+            await run_stdio_server()
+        elif args.transport == 'http':
+            logger.info(f"Starting MCP server with HTTP transport on {args.http_host}:{args.http_port}")
+            await run_http_server(args.http_host, args.http_port)
     finally:
         # Clean up API session
         if api_session:

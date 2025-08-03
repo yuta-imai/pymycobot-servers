@@ -62,7 +62,7 @@ python mycobot_api_server.py
 python mycobot_api_server.py --host 0.0.0.0 --port 8080
 
 # Custom robot connection
-python mycobot_api_server.py --robot-port /dev/ttyUSB0 --robot-baudrate 115200
+python mycobot_api_server.py --robot-port /dev/ttyACM0 --robot-baudrate 115200
 
 # Development mode with auto-reload
 python mycobot_api_server.py --reload
@@ -180,7 +180,9 @@ For localhost API server (default):
       "args": [
         "run", "--rm", "-i",
         "--network", "host",
-        "your-dockerhub-username/mycobot-mcp-server:latest"
+        "imaifactory/pymycobot-mcp-server:latest",
+        "--api-host", "localhost",
+        "--api-port", "8080"
       ]
     }
   }
@@ -279,7 +281,7 @@ python mycobot_api_server.py --help
 Options:
 - `--host`: Host to bind server (default: 0.0.0.0)
 - `--port`: Port to bind server (default: 8080)
-- `--robot-port`: Robot serial port (default: /dev/ttyUSB0)
+- `--robot-port`: Robot serial port (default: /dev/ttyACM0)
 - `--robot-baudrate`: Robot baudrate (default: 115200)
 - `--reload`: Enable auto-reload for development
 
