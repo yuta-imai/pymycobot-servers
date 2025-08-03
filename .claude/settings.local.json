@@ -15,7 +15,11 @@
       "Bash(pkill:*)",
       "Bash(timeout:*)",
       "Bash(.venv/bin/python:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(chmod:*)",
+      "Bash(pip install:*)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(ls:*)"
     ],
     "deny": []
   }

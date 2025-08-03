@@ -1,0 +1,20 @@
+INFO:__main__:Starting MyCobot Remote MCP HTTP Server
+INFO:__main__:HTTP Server: 127.0.0.1:8084
+INFO:__main__:API Server: localhost:8080
+INFO:mycobot_mcp_lib:Connected to MyCobot API server at http://localhost:8080
+INFO:mycobot_mcp_lib:Robot connected: True
+INFO:__main__:============================================================
+INFO:__main__:MyCobot Remote MCP Server Started!
+INFO:__main__:============================================================
+INFO:__main__:🌐 HTTP Server: http://127.0.0.1:8084
+INFO:__main__:🔌 SSE Endpoint: http://127.0.0.1:8084/sse
+INFO:__main__:❤️  Health Check: http://127.0.0.1:8084/health
+INFO:__main__:📋 MCP Spec: http://127.0.0.1:8084/mcp
+INFO:__main__:🤖 API Server: http://localhost:8080
+INFO:__main__:============================================================
+INFO:__main__:🎯 Ready for ChatGPT Remote MCP connections!
+INFO:__main__:💡 Add this URL to ChatGPT: http://127.0.0.1:8084/sse
+INFO:__main__:============================================================
+ERROR:__main__:SSE transport error: 'SseServerTransport' object has no attribute 'response'
+INFO:aiohttp.access:127.0.0.1 [03/Aug/2025:20:46:47 +0900] "POST /sse HTTP/1.1" 500 426 "-" "curl/7.88.1"
+ERROR:__main__:Server run error: Server.run() missing 1 required positional argument: 'initialization_options'

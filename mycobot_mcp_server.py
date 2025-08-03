@@ -3,649 +3,53 @@ MyCobot MCP Server
 
 Model Context Protocol (MCP) server for MyCobot robot control.
 Provides tools for external systems to control the robot through REST API.
+
+This version maintains backward compatibility while using the new library structure.
+Now includes ChatGPT Remote MCP compatibility with search and fetch tools.
 """
 
 import asyncio
-import json
+import argparse
 import logging
 import sys
-from typing import Any, Dict, List, Optional, Union
-import argparse
-import aiohttp
-from aiohttp import web, web_request
+from typing import Optional
 
-from mcp.server import Server
-from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 from mcp.server.sse import SseServerTransport
-from mcp.types import (
-    CallToolRequest,
-    CallToolResult,
-    GetPromptRequest,
-    GetPromptResult,
-    ListPromptsRequest,
-    ListPromptsResult,
-    ListResourcesRequest,
-    ListResourcesResult,
-    ListToolsRequest,
-    ListToolsResult,
-    Prompt,
-    PromptMessage,
-    Resource,
-    Tool,
-    TextContent,
-    ImageContent,
-    EmbeddedResource
-)
+from mcp.server.models import InitializationOptions
 from mcp.server.lowlevel.server import NotificationOptions
+from aiohttp import web, web_request
 
-
-# Global API client session and base URL
-api_session: Optional[aiohttp.ClientSession] = None
-api_base_url: str = "http://localhost:8080"
+from mycobot_mcp_lib import MyCobotMCPServer
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def ensure_api_session():
-    """Ensure API session is initialized."""
-    global api_session
-    if api_session is None:
-        raise RuntimeError("API session not initialized")
+# Global MCP server instance
+mcp_server_instance: Optional[MyCobotMCPServer] = None
 
 
-async def get_joint_angle(joint_num: int) -> Dict[str, Any]:
-    """Get current angle of a specific joint."""
-    ensure_api_session()
-    
-    if not (1 <= joint_num <= 6):
-        raise ValueError(f"Joint number must be between 1-6, got {joint_num}")
-    
-    # Use get_all_joint_angles and extract the specific joint
-    # because the single joint API endpoint has issues
-    async with api_session.get(f"{api_base_url}/joints/angles") as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        data = await response.json()
-        angles = data["angles"]
-        
-        return {
-            "joint_num": joint_num,
-            "angle": angles[joint_num - 1],  # Convert to 0-based index
-            "unit": "degrees"
-        }
-
-
-async def move_joint(joint_num: int, angle: float, speed: int = 50) -> Dict[str, Any]:
-    """Move a specific joint to target angle."""
-    ensure_api_session()
-    
-    if not (1 <= joint_num <= 6):
-        raise ValueError(f"Joint number must be between 1-6, got {joint_num}")
-    
-    payload = {"angle": angle, "speed": speed}
-    async with api_session.put(f"{api_base_url}/joints/{joint_num}/angle", json=payload) as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        return {
-            "success": True,
-            "message": f"Joint {joint_num} moving to {angle} degrees at speed {speed}",
-            "joint_num": joint_num,
-            "target_angle": angle,
-            "speed": speed
-        }
-
-
-async def get_all_joint_angles() -> Dict[str, Any]:
-    """Get current angles of all joints."""
-    ensure_api_session()
-    
-    async with api_session.get(f"{api_base_url}/joints/angles") as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        data = await response.json()
-        angles = data["angles"]
-        return {
-            "joint_angles": angles,
-            "joints": [
-                {"joint": 1, "angle": angles[0], "name": "Base"},
-                {"joint": 2, "angle": angles[1], "name": "Shoulder"},
-                {"joint": 3, "angle": angles[2], "name": "Elbow"},
-                {"joint": 4, "angle": angles[3], "name": "Wrist 1"},
-                {"joint": 5, "angle": angles[4], "name": "Wrist 2"},
-                {"joint": 6, "angle": angles[5], "name": "Wrist 3"}
-            ],
-            "unit": "degrees"
-        }
-
-
-async def move_all_joints(angles: List[float], speed: int = 50) -> Dict[str, Any]:
-    """Move all joints to specified angles simultaneously."""
-    ensure_api_session()
-    
-    if len(angles) != 6:
-        raise ValueError("Must provide exactly 6 angles")
-    
-    payload = {"angles": angles, "speed": speed}
-    async with api_session.put(f"{api_base_url}/joints/angles", json=payload) as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        return {
-            "success": True,
-            "message": f"All joints moving to {angles} at speed {speed}",
-            "target_angles": angles,
-            "speed": speed
-        }
-
-
-async def home_position(speed: int = 50) -> Dict[str, Any]:
-    """Move all joints to home position (0 degrees)."""
-    ensure_api_session()
-    
-    payload = {"speed": speed}
-    async with api_session.post(f"{api_base_url}/robot/home", json=payload) as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        return {
-            "success": True,
-            "message": f"Moving to home position at speed {speed}",
-            "target_angles": [0, 0, 0, 0, 0, 0],
-            "speed": speed
-        }
-
-
-async def stop_robot() -> Dict[str, Any]:
-    """Emergency stop for all joint movements."""
-    ensure_api_session()
-    
-    async with api_session.post(f"{api_base_url}/robot/stop") as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        return {
-            "success": True,
-            "message": "All joints stopped"
-        }
-
-
-async def jog_joint(joint_num: int, direction: int, speed: int = 50) -> Dict[str, Any]:
-    """Jog a joint in specified direction."""
-    ensure_api_session()
-    
-    if not (1 <= joint_num <= 6):
-        raise ValueError(f"Joint number must be between 1-6, got {joint_num}")
-    
-    if direction not in [-1, 1]:
-        raise ValueError("Direction must be 1 or -1")
-    
-    payload = {"direction": direction, "speed": speed}
-    async with api_session.post(f"{api_base_url}/joints/{joint_num}/jog", json=payload) as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        direction_str = "positive" if direction == 1 else "negative"
-        return {
-            "success": True,
-            "message": f"Joint {joint_num} jogging in {direction_str} direction at speed {speed}",
-            "joint_num": joint_num,
-            "direction": direction,
-            "speed": speed
-        }
-
-
-async def wait_for_completion(timeout: float = 10.0) -> Dict[str, Any]:
-    """Wait for robot to complete current movement."""
-    ensure_api_session()
-    
-    payload = {"timeout": timeout}
-    async with api_session.post(f"{api_base_url}/robot/wait", json=payload) as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        data = await response.json()
-        return {
-            "completed": data["completed"],
-            "elapsed_time": data["elapsed_time"],
-            "timeout": timeout
-        }
-
-
-async def get_robot_status() -> Dict[str, Any]:
-    """Get current robot status including joint angles and movement state."""
-    ensure_api_session()
-    
-    async with api_session.get(f"{api_base_url}/robot/status") as response:
-        if response.status != 200:
-            error_text = await response.text()
-            raise RuntimeError(f"API request failed: {response.status} - {error_text}")
-        
-        data = await response.json()
-        joint_angles = data["joint_angles"]
-        is_moving = data["is_moving"]
-        
-        return {
-            "joint_angles": joint_angles,
-            "is_moving": is_moving,
-            "joints": [
-                {"joint": 1, "angle": joint_angles[0], "name": "Base"},
-                {"joint": 2, "angle": joint_angles[1], "name": "Shoulder"},
-                {"joint": 3, "angle": joint_angles[2], "name": "Elbow"},
-                {"joint": 4, "angle": joint_angles[3], "name": "Wrist 1"},
-                {"joint": 5, "angle": joint_angles[4], "name": "Wrist 2"},
-                {"joint": 6, "angle": joint_angles[5], "name": "Wrist 3"}
-            ],
-            "unit": "degrees"
-        }
-
-
-# Create MCP server
-server = Server("mycobot-controller")
-
-
-@server.list_tools()
-async def handle_list_tools() -> List[Tool]:
-    """List available tools for MyCobot control."""
-    return [
-        Tool(
-            name="get_joint_angle",
-            description="Get current angle of a specific joint (1-6)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "joint_num": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 6,
-                        "description": "Joint number (1-6)"
-                    }
-                },
-                "required": ["joint_num"]
-            }
-        ),
-        Tool(
-            name="move_joint",
-            description="Move a specific joint to target angle",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "joint_num": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 6,
-                        "description": "Joint number (1-6)"
-                    },
-                    "angle": {
-                        "type": "number",
-                        "minimum": -175,
-                        "maximum": 175,
-                        "description": "Target angle in degrees"
-                    },
-                    "speed": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 100,
-                        "default": 50,
-                        "description": "Movement speed (1-100)"
-                    }
-                },
-                "required": ["joint_num", "angle"]
-            }
-        ),
-        Tool(
-            name="get_all_joint_angles",
-            description="Get current angles of all joints",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        Tool(
-            name="move_all_joints",
-            description="Move all joints to specified angles simultaneously",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "angles": {
-                        "type": "array",
-                        "items": {
-                            "type": "number",
-                            "minimum": -175,
-                            "maximum": 175
-                        },
-                        "minItems": 6,
-                        "maxItems": 6,
-                        "description": "6 joint angles in degrees [J1, J2, J3, J4, J5, J6]"
-                    },
-                    "speed": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 100,
-                        "default": 50,
-                        "description": "Movement speed (1-100)"
-                    }
-                },
-                "required": ["angles"]
-            }
-        ),
-        Tool(
-            name="home_position",
-            description="Move all joints to home position (0 degrees)",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "speed": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 100,
-                        "default": 50,
-                        "description": "Movement speed (1-100)"
-                    }
-                },
-                "required": []
-            }
-        ),
-        Tool(
-            name="stop_robot",
-            description="Emergency stop for all joint movements",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        Tool(
-            name="jog_joint",
-            description="Jog a joint in specified direction",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "joint_num": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 6,
-                        "description": "Joint number (1-6)"
-                    },
-                    "direction": {
-                        "type": "integer",
-                        "enum": [-1, 1],
-                        "description": "1 for positive direction, -1 for negative"
-                    },
-                    "speed": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 100,
-                        "default": 50,
-                        "description": "Movement speed (1-100)"
-                    }
-                },
-                "required": ["joint_num", "direction"]
-            }
-        ),
-        Tool(
-            name="wait_for_completion",
-            description="Wait for robot to complete current movement",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "timeout": {
-                        "type": "number",
-                        "minimum": 0.1,
-                        "maximum": 60.0,
-                        "default": 10.0,
-                        "description": "Maximum time to wait in seconds"
-                    }
-                },
-                "required": []
-            }
-        ),
-        Tool(
-            name="get_robot_status",
-            description="Get current robot status including joint angles and movement state",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        )
-    ]
-
-
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> CallToolResult:
-    """Handle tool calls."""
-    try:
-        if name == "get_joint_angle":
-            result = await get_joint_angle(arguments["joint_num"])
-        elif name == "move_joint":
-            result = await move_joint(
-                arguments["joint_num"],
-                arguments["angle"],
-                arguments.get("speed", 50)
-            )
-        elif name == "get_all_joint_angles":
-            result = await get_all_joint_angles()
-        elif name == "move_all_joints":
-            result = await move_all_joints(
-                arguments["angles"],
-                arguments.get("speed", 50)
-            )
-        elif name == "home_position":
-            result = await home_position(arguments.get("speed", 50))
-        elif name == "stop_robot":
-            result = await stop_robot()
-        elif name == "jog_joint":
-            result = await jog_joint(
-                arguments["joint_num"],
-                arguments["direction"],
-                arguments.get("speed", 50)
-            )
-        elif name == "wait_for_completion":
-            result = await wait_for_completion(arguments.get("timeout", 10.0))
-        elif name == "get_robot_status":
-            result = await get_robot_status()
-        else:
-            # Create proper error TextContent for unknown tool
-            unknown_tool_content = TextContent(
-                type="text",
-                text=f"Unknown tool: {name}",
-                annotations=None
-            )
-            return CallToolResult(
-                content=[unknown_tool_content],
-                isError=True,
-                meta=None
-            )
-        
-        # Create proper TextContent object with all required fields
-        text_content = TextContent(
-            type="text",
-            text=json.dumps(result, indent=2),
-            annotations=None
-        )
-        return CallToolResult(
-            content=[text_content],
-            isError=False,
-            meta=None
-        )
-    
-    except Exception as e:
-        error_result = {
-            "error": str(e),
-            "tool": name,
-            "arguments": arguments
-        }
-        # Create proper error TextContent object
-        error_text_content = TextContent(
-            type="text", 
-            text=json.dumps(error_result, indent=2),
-            annotations=None
-        )
-        return CallToolResult(
-            content=[error_text_content],
-            isError=True,
-            meta=None
-        )
-
-
-@server.list_prompts()
-async def handle_list_prompts() -> List[Prompt]:
-    """List available prompts."""
-    return [
-        Prompt(
-            name="robot_status",
-            description="Get comprehensive robot status information",
-            arguments=[]
-        ),
-        Prompt(
-            name="joint_info",
-            description="Get information about robot joints and their limits",
-            arguments=[]
-        ),
-        Prompt(
-            name="basic_movements",
-            description="Examples of basic robot movements",
-            arguments=[]
-        )
-    ]
-
-
-@server.get_prompt()
-async def handle_get_prompt(name: str, arguments: Dict[str, str]) -> GetPromptResult:
-    """Handle prompt requests."""
-    if name == "robot_status":
-        try:
-            status = await get_robot_status()
-            prompt_text = f"""
-MyCobot Robot Status:
-
-Current Joint Angles:
-- Joint 1 (Base): {status['joints'][0]['angle']:.1f}°
-- Joint 2 (Shoulder): {status['joints'][1]['angle']:.1f}°
-- Joint 3 (Elbow): {status['joints'][2]['angle']:.1f}°
-- Joint 4 (Wrist 1): {status['joints'][3]['angle']:.1f}°
-- Joint 5 (Wrist 2): {status['joints'][4]['angle']:.1f}°
-- Joint 6 (Wrist 3): {status['joints'][5]['angle']:.1f}°
-
-Robot Movement State: {"Moving" if status['is_moving'] else "Stationary"}
-"""
-        except Exception as e:
-            prompt_text = f"Error getting robot status: {str(e)}"
-        
-        return GetPromptResult(
-            description="Current robot status",
-            messages=[
-                PromptMessage(
-                    role="user",
-                    content=TextContent(
-                        type="text", 
-                        text=prompt_text,
-                        annotations=None
-                    )
-                )
-            ]
-        )
-    
-    elif name == "joint_info":
-        prompt_text = """
-MyCobot 280 Joint Information:
-
-Joint Limits (degrees):
-- Joint 1 (Base): -165° to +165°
-- Joint 2 (Shoulder): -165° to +165°
-- Joint 3 (Elbow): -165° to +165°
-- Joint 4 (Wrist 1): -165° to +165°
-- Joint 5 (Wrist 2): -165° to +165°
-- Joint 6 (Wrist 3): -175° to +175°
-
-Movement Speed Range: 1-100 (1=slowest, 100=fastest)
-Home Position: All joints at 0°
-"""
-        return GetPromptResult(
-            description="Robot joint information and limits",
-            messages=[
-                PromptMessage(
-                    role="user",
-                    content=TextContent(
-                        type="text", 
-                        text=prompt_text,
-                        annotations=None
-                    )
-                )
-            ]
-        )
-    
-    elif name == "basic_movements":
-        prompt_text = """
-MyCobot Basic Movement Examples:
-
-1. Move to Home Position:
-   - Use: home_position tool with speed parameter
-
-2. Move Single Joint:
-   - Use: move_joint tool with joint_num (1-6), angle (-175 to 175), speed (1-100)
-
-3. Move All Joints:
-   - Use: move_all_joints tool with array of 6 angles and speed
-
-4. Get Current Position:
-   - Use: get_all_joint_angles or get_joint_angle tools
-
-5. Jog Joint:
-   - Use: jog_joint tool with joint_num, direction (1 or -1), speed
-
-6. Emergency Stop:
-   - Use: stop_robot tool
-
-7. Wait for Movement:
-   - Use: wait_for_completion tool with timeout
-
-Always check robot status before and after movements for safety.
-"""
-        return GetPromptResult(
-            description="Basic robot movement examples and usage",
-            messages=[
-                PromptMessage(
-                    role="user",
-                    content=TextContent(
-                        type="text", 
-                        text=prompt_text,
-                        annotations=None
-                    )
-                )
-            ]
-        )
-    
-    else:
-        raise ValueError(f"Unknown prompt: {name}")
-
-
-async def run_stdio_server():
+async def run_stdio_server(api_host: str = "localhost", api_port: int = 8080):
     """Run the MCP server using STDIO transport."""
+    global mcp_server_instance
+    mcp_server_instance = MyCobotMCPServer(api_host, api_port)
+    
+    # Initialize API session
+    if not await mcp_server_instance.initialize_api_session():
+        logger.error("Failed to connect to API server")
+        sys.exit(1)
+    
     try:
         async with stdio_server() as (read_stream, write_stream):
-            await server.run(
+            await mcp_server_instance.server.run(
                 read_stream,
                 write_stream,
                 InitializationOptions(
                     server_name="mycobot-controller",
                     server_version="1.0.0",
-                    capabilities=server.get_capabilities(
+                    capabilities=mcp_server_instance.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={}
                     )
@@ -656,20 +60,27 @@ async def run_stdio_server():
     except Exception as e:
         logger.error(f"Server error: {e}")
         raise
+    finally:
+        if mcp_server_instance:
+            await mcp_server_instance.cleanup()
 
 
 async def create_sse_transport(request: web_request.Request) -> web.Response:
     """Create SSE transport for HTTP MCP connection."""
+    global mcp_server_instance
+    if not mcp_server_instance:
+        return web.Response(status=500, text="MCP server not initialized")
+    
     try:
         transport = SseServerTransport("/message", request)
         
         async def _run_server():
-            await server.run(
+            await mcp_server_instance.server.run(
                 transport,
                 InitializationOptions(
                     server_name="mycobot-controller",
                     server_version="1.0.0",
-                    capabilities=server.get_capabilities(
+                    capabilities=mcp_server_instance.server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={}
                     )
@@ -684,8 +95,17 @@ async def create_sse_transport(request: web_request.Request) -> web.Response:
         return web.Response(status=500, text=f"Transport error: {e}")
 
 
-async def run_http_server(host: str = "localhost", port: int = 8081):
+async def run_http_server(host: str = "localhost", port: int = 8081, 
+                         api_host: str = "localhost", api_port: int = 8080):
     """Run the MCP server using HTTP transport."""
+    global mcp_server_instance
+    mcp_server_instance = MyCobotMCPServer(api_host, api_port)
+    
+    # Initialize API session
+    if not await mcp_server_instance.initialize_api_session():
+        logger.error("Failed to connect to API server")
+        sys.exit(1)
+    
     app = web.Application()
     
     # Add CORS headers
@@ -694,7 +114,8 @@ async def run_http_server(host: str = "localhost", port: int = 8081):
             response = await handler(request)
             response.headers["Access-Control-Allow-Origin"] = "*"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+            response.headers["Access-Control-Allow-Credentials"] = "true"
             return response
         except Exception as e:
             logger.error(f"CORS middleware error: {e}")
@@ -711,15 +132,34 @@ async def run_http_server(host: str = "localhost", port: int = 8081):
             headers={
                 "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type"
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                "Access-Control-Allow-Credentials": "true"
             }
         )
     
     app.router.add_options("/sse", options_handler)
+    app.router.add_options("/{path:.*}", options_handler)
     
     # Health check endpoint
     async def health_handler(request):
-        return web.json_response({"status": "healthy", "transport": "http"})
+        try:
+            robot_status = await mcp_server_instance.get_robot_status()
+            return web.json_response({
+                "status": "healthy", 
+                "transport": "http",
+                "mcp_server": "mycobot-controller",
+                "version": "1.0.0",
+                "robot_connected": True,
+                "robot_moving": robot_status.get("is_moving", False),
+                "capabilities": ["search", "fetch", "robot_control"],
+                "description": "MyCobot MCP Server (backward compatible version)"
+            })
+        except Exception as e:
+            return web.json_response({
+                "status": "degraded",
+                "transport": "http",
+                "error": str(e)
+            }, status=503)
     
     app.router.add_get("/health", health_handler)
     
@@ -731,6 +171,7 @@ async def run_http_server(host: str = "localhost", port: int = 8081):
     logger.info(f"HTTP MCP server started on {host}:{port}")
     logger.info(f"SSE endpoint: http://{host}:{port}/sse")
     logger.info(f"Health check: http://{host}:{port}/health")
+    logger.info("Now includes ChatGPT Remote MCP compatibility!")
     
     try:
         await asyncio.Event().wait()
@@ -738,11 +179,15 @@ async def run_http_server(host: str = "localhost", port: int = 8081):
         logger.info("HTTP server interrupted by user")
     finally:
         await runner.cleanup()
+        if mcp_server_instance:
+            await mcp_server_instance.cleanup()
 
 
-async def main():
+def main():
     """Main function to run the MCP server."""
-    parser = argparse.ArgumentParser(description='MyCobot MCP Server')
+    parser = argparse.ArgumentParser(
+        description='MyCobot MCP Server (Backward Compatible with Remote MCP Support)'
+    )
     parser.add_argument('--api-host', type=str, default='localhost',
                        help='MyCobot API server host (default: localhost)')
     parser.add_argument('--api-port', type=int, default=8080,
@@ -756,43 +201,29 @@ async def main():
     
     args = parser.parse_args()
     
-    # Initialize API session
-    global api_session, api_base_url
-    api_base_url = f"http://{args.api_host}:{args.api_port}"
-    
-    try:
-        api_session = aiohttp.ClientSession()
-        
-        # Test API connection
-        async with api_session.get(f"{api_base_url}/health") as response:
-            if response.status == 200:
-                health_data = await response.json()
-                logger.info(f"Connected to MyCobot API server at {api_base_url}")
-                logger.info(f"Robot connected: {health_data.get('robot_connected', False)}")
-            else:
-                logger.warning(f"API server responded with status {response.status}")
-                
-    except Exception as e:
-        logger.error(f"Failed to connect to API server at {api_base_url}: {e}")
-        logger.info("Make sure the MyCobot API server is running")
-        sys.exit(1)
+    logger.info("=" * 60)
+    logger.info("MyCobot MCP Server (Enhanced with Remote MCP)")
+    logger.info("=" * 60)
+    logger.info(f"API Server: {args.api_host}:{args.api_port}")
+    logger.info(f"Transport: {args.transport}")
+    if args.transport == 'http':
+        logger.info(f"HTTP Server: {args.http_host}:{args.http_port}")
+    logger.info("New Features: search/fetch tools for ChatGPT compatibility")
+    logger.info("=" * 60)
     
     try:
         if args.transport == 'stdio':
             logger.info("Starting MCP server with STDIO transport")
-            await run_stdio_server()
+            asyncio.run(run_stdio_server(args.api_host, args.api_port))
         elif args.transport == 'http':
             logger.info(f"Starting MCP server with HTTP transport on {args.http_host}:{args.http_port}")
-            await run_http_server(args.http_host, args.http_port)
-    finally:
-        # Clean up API session
-        if api_session:
-            try:
-                await api_session.close()
-                logger.info("API session closed")
-            except Exception as e:
-                logger.error(f"Error closing API session: {e}")
+            asyncio.run(run_http_server(args.http_host, args.http_port, args.api_host, args.api_port))
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.error(f"Server failed: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
