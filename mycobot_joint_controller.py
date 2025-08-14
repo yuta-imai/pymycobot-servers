@@ -73,7 +73,11 @@ class MyCobotJointController:
             Current angle in degrees
         """
         self._validate_joint_number(joint_num)
-        return self.mc.get_angle(joint_num)
+        angle = self.mc.get_angle(joint_num)
+        # Handle case where robot returns -1 on communication failure
+        if angle == -1 or angle is None:
+            return 0.0  # Return default/safe angle
+        return angle
     
     def move_joint_1(self, angle: float, speed: int = 50) -> None:
         """Move Joint 1 (Base) to specified angle."""
@@ -101,7 +105,11 @@ class MyCobotJointController:
     
     def get_all_joint_angles(self) -> List[float]:
         """Get current angles of all joints."""
-        return self.mc.get_angles()
+        angles = self.mc.get_angles()
+        # Handle case where robot returns -1 on communication failure
+        if angles == -1 or angles is None:
+            return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Return default/safe angles
+        return angles
     
     def move_all_joints(self, angles: List[float], speed: int = 50) -> None:
         """

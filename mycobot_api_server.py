@@ -347,7 +347,10 @@ async def get_robot_status():
     
     try:
         joint_angles = controller.get_all_joint_angles()
-        is_moving = controller.mc.is_moving()
+        is_moving_result = controller.mc.is_moving()
+        
+        # Handle case where robot returns -1 on communication failure
+        is_moving = False if is_moving_result == -1 or is_moving_result is None else bool(is_moving_result)
         
         return RobotStatusResponse(
             joint_angles=joint_angles,

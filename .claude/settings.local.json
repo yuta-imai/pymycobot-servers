@@ -19,7 +19,9 @@
       "Bash(chmod:*)",
       "Bash(pip install:*)",
       "Bash(.venv/bin/pip install:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(apt list:*)",
+      "Bash(source:*)"
     ],
     "deny": []
   }
