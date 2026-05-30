@@ -253,6 +253,7 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── mycobot_joint_controller.py    # Core joint control module
 ├── rtsp_camera_server.py          # RTSP streaming server
 ├── mycobot_api_server.py          # REST API server
+├── soracom-mcp-server/            # MCP server for SORACOM live APIs
 ├── mycobot_api_spec.yaml          # OpenAPI specification
 ├── requirements.txt               # Python dependencies
 └── README.md                      # This file
