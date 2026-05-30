@@ -8,6 +8,7 @@ A comprehensive robotics control system for MyCobot arms with camera streaming a
 - **Gripper Control**: Open/close/release operations and value-based gripper positioning
 - **Camera Streaming**: RTSP video streaming from Raspberry Pi camera
 - **REST API**: HTTP-based remote control with OpenAPI specification
+- **MCP Server**: Control the arm from Claude Desktop and other MCP clients (see [`mcp-server/`](mcp-server/))
 - **Safety Features**: Angle validation, joint limits, and emergency stops
 
 ## Installation
@@ -121,6 +122,28 @@ curl -X POST "http://localhost:8080/robot/stop"
 # Get robot status
 curl http://localhost:8080/robot/status
 ```
+
+### 4. MCP Server (Claude Desktop)
+
+A standalone MCP server lets Claude Desktop (and other MCP clients) control the arm.
+It is a separate Node/TypeScript runtime that talks to the REST API above over HTTP —
+there is no code dependency on the Python code. It is published to npm and runs via
+`npx`, so no local build is required to use it:
+
+```json
+{
+  "mcpServers": {
+    "mycobot": {
+      "command": "npx",
+      "args": ["-y", "@yuta-imai/mycobot-mcp-server"],
+      "env": { "MYCOBOT_API_BASE_URL": "http://localhost:8080" }
+    }
+  }
+}
+```
+
+See [`mcp-server/`](mcp-server/) for the full tool list, configuration, and development
+instructions.
 
 ## API Reference
 
@@ -254,6 +277,7 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── rtsp_camera_server.py          # RTSP streaming server
 ├── mycobot_api_server.py          # REST API server
 ├── mycobot_api_spec.yaml          # OpenAPI specification
+├── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript)
 ├── requirements.txt               # Python dependencies
 └── README.md                      # This file
 ```

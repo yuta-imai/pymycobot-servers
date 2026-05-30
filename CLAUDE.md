@@ -14,7 +14,8 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 ├── mycobot_joint_controller.py    # Main MyCobot joint control module
 ├── rtsp_camera_server.py          # RTSP camera streaming server
 ├── mycobot_api_spec.yaml          # OpenAPI specification for REST API
-└── mycobot_api_server.py          # REST API server (FastAPI)
+├── mycobot_api_server.py          # REST API server (FastAPI)
+└── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript, separate runtime)
 ```
 
 ## Development Commands
@@ -35,6 +36,13 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 - Import modules:
   - `from mycobot_joint_controller import MyCobotJointController`
   - `from rtsp_camera_server import RTSPCameraServer`
+
+### MCP Server (Node/TypeScript, in `mcp-server/`)
+- Separate runtime with **no code dependency** on the Python code; talks to the REST API over HTTP.
+- Install/build: `cd mcp-server && npm install && npm run build`
+- Regenerate API types after editing `mycobot_api_spec.yaml`: `npm run generate`
+- Inspect tools locally: `npm run inspect` (opens the MCP Inspector)
+- Distributed via npm; runs through `npx @yuta-imai/mycobot-mcp-server`
 
 ### System Dependencies
 - **FFmpeg**: Required for RTSP streaming: `sudo apt install ffmpeg`
@@ -61,6 +69,13 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 - **External Access**: Serves on `0.0.0.0:8080` by default for network access
 - **Interactive Docs**: Swagger UI available at `/docs` endpoint
 - **CORS Enabled**: Supports cross-origin requests for web applications
+
+### MCP Server (`mcp-server/`)
+- **Separate Node/TypeScript runtime**: Published to npm, run via `npx`; intended mainly for Claude Desktop (stdio transport)
+- **No code coupling**: Controls the robot only through the REST API over HTTP; the sole contract is `mycobot_api_spec.yaml`, consumed at build time via `openapi-typescript`
+- **Curated tools**: `get_robot_status`, `get_joint_angles`, `move_joint`, `move_all_joints`, `jog_joint`, `control_gripper`, `go_home`, `stop_robot`, `wait_for_movement`
+- **Input validation**: zod schemas enforce joint/speed/gripper limits before any request is sent
+- **Layout**: `src/api-client.ts` (typed HTTP wrapper), `src/tools.ts` (tool definitions), `src/server.ts` + `src/index.ts` (server + stdio entry), `src/generated/api-types.ts` (generated, committed)
 
 ### Key Features
 
