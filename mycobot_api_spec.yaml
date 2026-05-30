@@ -16,6 +16,8 @@ servers:
 tags:
   - name: joints
     description: Individual joint operations
+  - name: gripper
+    description: Gripper control operations
   - name: robot
     description: Overall robot operations
   - name: system
@@ -208,6 +210,192 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /gripper/open:
+    post:
+      tags:
+        - gripper
+      summary: Open gripper
+      description: Open gripper
+      operationId: open_gripper
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GripperActionRequest'
+      responses:
+        '200':
+          description: Gripper open command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /gripper/close:
+    post:
+      tags:
+        - gripper
+      summary: Close gripper
+      description: Close gripper
+      operationId: close_gripper
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GripperActionRequest'
+      responses:
+        '200':
+          description: Gripper close command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /gripper/release:
+    post:
+      tags:
+        - gripper
+      summary: Release gripper
+      description: Release gripper (firmware-supported torque release mode)
+      operationId: release_gripper
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GripperActionRequest'
+      responses:
+        '200':
+          description: Gripper release command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /gripper/state:
+    put:
+      tags:
+        - gripper
+      summary: Set gripper state
+      description: Set gripper state directly (0=open, 1=close, 10=release)
+      operationId: set_gripper_state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GripperStateRequest'
+      responses:
+        '200':
+          description: Gripper state command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /gripper/value:
+    put:
+      tags:
+        - gripper
+      summary: Set gripper value
+      description: Set gripper opening value (0-100)
+      operationId: set_gripper_value
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GripperValueRequest'
+      responses:
+        '200':
+          description: Gripper value command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /gripper/calibrate:
+    post:
+      tags:
+        - gripper
+      summary: Calibrate gripper
+      description: Calibrate gripper and set current position as reference
+      operationId: calibrate_gripper
+      responses:
+        '200':
+          description: Gripper calibration command sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
         '503':
           description: Robot connection error
           content:
@@ -471,6 +659,75 @@ components:
           default: 10.0
           example: 10.0
           description: "Maximum time to wait in seconds"
+
+    GripperActionRequest:
+      type: object
+      properties:
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          example: 50
+          description: "Gripper movement speed (1-100)"
+        gripper_type:
+          type: integer
+          minimum: 1
+          maximum: 4
+          nullable: true
+          example: 1
+          description: "Gripper type: 1=adaptive, 2=5-finger dexterous, 3=parallel, 4=flexible"
+
+    GripperStateRequest:
+      type: object
+      properties:
+        state:
+          type: integer
+          enum: [0, 1, 10]
+          example: 1
+          description: "0=open, 1=close, 10=release"
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          example: 50
+          description: "Gripper movement speed (1-100)"
+        gripper_type:
+          type: integer
+          minimum: 1
+          maximum: 4
+          nullable: true
+          example: 1
+          description: "Gripper type: 1=adaptive, 2=5-finger dexterous, 3=parallel, 4=flexible"
+      required:
+        - state
+
+    GripperValueRequest:
+      type: object
+      properties:
+        value:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 50
+          description: "Gripper opening value (0-100)"
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+          example: 50
+          description: "Gripper movement speed (1-100)"
+        gripper_type:
+          type: integer
+          minimum: 1
+          maximum: 4
+          nullable: true
+          example: 1
+          description: "Gripper type (set value supports 1=adaptive, 3=parallel, 4=flexible)"
+      required:
+        - value
 
     WaitResponse:
       type: object

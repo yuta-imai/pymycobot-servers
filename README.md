@@ -5,6 +5,7 @@ A comprehensive robotics control system for MyCobot arms with camera streaming a
 ## Features
 
 - **Joint Control**: Precise individual and simultaneous joint movements
+- **Gripper Control**: Open/close/release operations and value-based gripper positioning
 - **Camera Streaming**: RTSP video streaming from Raspberry Pi camera
 - **REST API**: HTTP-based remote control with OpenAPI specification
 - **MCP Server**: Model Context Protocol integration for AI systems
@@ -94,6 +95,21 @@ curl -X PUT "http://localhost:8080/joints/1/angle" \
 curl -X PUT "http://localhost:8080/joints/angles" \
      -H "Content-Type: application/json" \
      -d '{"angles": [0, 45, -30, 90, -15, 60], "speed": 50}'
+
+# Open gripper
+curl -X POST "http://localhost:8080/gripper/open" \
+     -H "Content-Type: application/json" \
+     -d '{"speed": 50}'
+
+# Set gripper opening value (0-100)
+curl -X PUT "http://localhost:8080/gripper/value" \
+     -H "Content-Type: application/json" \
+     -d '{"value": 30, "speed": 40}'
+
+# Close gripper
+curl -X POST "http://localhost:8080/gripper/close" \
+     -H "Content-Type: application/json" \
+     -d '{"speed": 50}'
 
 # Move to home position
 curl -X POST "http://localhost:8080/robot/home" \
@@ -247,6 +263,12 @@ docker push your-dockerhub-username/mycobot-mcp-server:latest
 | GET | `/joints/angles` | Get all joint angles |
 | PUT | `/joints/angles` | Move all joints |
 | POST | `/joints/{joint_num}/jog` | Jog joint in direction |
+| POST | `/gripper/open` | Open gripper |
+| POST | `/gripper/close` | Close gripper |
+| POST | `/gripper/release` | Release gripper |
+| PUT | `/gripper/state` | Set gripper state (0/1/10) |
+| PUT | `/gripper/value` | Set gripper opening value (0-100) |
+| POST | `/gripper/calibrate` | Calibrate gripper |
 | POST | `/robot/home` | Move to home position |
 | POST | `/robot/stop` | Emergency stop |
 | GET | `/robot/status` | Get robot status |
@@ -268,6 +290,19 @@ docker push your-dockerhub-username/mycobot-mcp-server:latest
 - **Range**: 1-100 (1=slowest, 100=fastest)
 - **Default**: 50
 - **Recommended**: 20-80 for smooth movements
+
+### Gripper Parameters
+
+- **State values** (`/gripper/state`):
+  - `0`: open
+  - `1`: close
+  - `10`: release
+- **Opening value range** (`/gripper/value`): `0-100`
+- **Gripper type** (optional):
+  - `1`: adaptive gripper
+  - `2`: 5-finger dexterous hand (state commands only)
+  - `3`: parallel gripper
+  - `4`: flexible gripper
 
 ## Configuration
 

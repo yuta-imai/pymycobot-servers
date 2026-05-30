@@ -50,6 +50,38 @@ class WaitRequest(BaseModel):
     timeout: float = Field(10.0, ge=0.1, le=60.0, description="Maximum time to wait in seconds")
 
 
+class GripperActionRequest(BaseModel):
+    speed: int = Field(50, ge=1, le=100, description="Gripper movement speed (1-100)")
+    gripper_type: Optional[int] = Field(
+        None,
+        ge=1,
+        le=4,
+        description="Gripper type: 1=adaptive, 2=5-finger dexterous, 3=parallel, 4=flexible"
+    )
+
+
+class GripperStateRequest(BaseModel):
+    state: int = Field(..., description="0=open, 1=close, 10=release")
+    speed: int = Field(50, ge=1, le=100, description="Gripper movement speed (1-100)")
+    gripper_type: Optional[int] = Field(
+        None,
+        ge=1,
+        le=4,
+        description="Gripper type: 1=adaptive, 2=5-finger dexterous, 3=parallel, 4=flexible"
+    )
+
+
+class GripperValueRequest(BaseModel):
+    value: int = Field(..., ge=0, le=100, description="Gripper opening value (0-100)")
+    speed: int = Field(50, ge=1, le=100, description="Gripper movement speed (1-100)")
+    gripper_type: Optional[int] = Field(
+        None,
+        ge=1,
+        le=4,
+        description="Gripper type (set value supports 1=adaptive, 3=parallel, 4=flexible)"
+    )
+
+
 # Response models
 class HealthResponse(BaseModel):
     status: str
@@ -296,6 +328,160 @@ async def jog_joint(joint_num: int, request: JogJointRequest):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to jog joint: {str(e)}"
+        )
+
+
+# Gripper control endpoints
+@app.post("/gripper/open", response_model=SuccessResponse, tags=["gripper"])
+async def open_gripper(request: Optional[GripperActionRequest] = None):
+    """Open gripper."""
+    ensure_controller()
+
+    speed = request.speed if request else 50
+    gripper_type = request.gripper_type if request else None
+
+    try:
+        controller.open_gripper(speed=speed, gripper_type=gripper_type)
+        gripper_type_msg = f", gripper_type {gripper_type}" if gripper_type is not None else ""
+        return SuccessResponse(
+            success=True,
+            message=f"Gripper opening at speed {speed}{gripper_type_msg}",
+            timestamp=get_current_timestamp()
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to open gripper: {str(e)}"
+        )
+
+
+@app.post("/gripper/close", response_model=SuccessResponse, tags=["gripper"])
+async def close_gripper(request: Optional[GripperActionRequest] = None):
+    """Close gripper."""
+    ensure_controller()
+
+    speed = request.speed if request else 50
+    gripper_type = request.gripper_type if request else None
+
+    try:
+        controller.close_gripper(speed=speed, gripper_type=gripper_type)
+        gripper_type_msg = f", gripper_type {gripper_type}" if gripper_type is not None else ""
+        return SuccessResponse(
+            success=True,
+            message=f"Gripper closing at speed {speed}{gripper_type_msg}",
+            timestamp=get_current_timestamp()
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to close gripper: {str(e)}"
+        )
+
+
+@app.post("/gripper/release", response_model=SuccessResponse, tags=["gripper"])
+async def release_gripper(request: Optional[GripperActionRequest] = None):
+    """Release gripper (firmware-supported torque release mode)."""
+    ensure_controller()
+
+    speed = request.speed if request else 50
+    gripper_type = request.gripper_type if request else None
+
+    try:
+        controller.release_gripper(speed=speed, gripper_type=gripper_type)
+        gripper_type_msg = f", gripper_type {gripper_type}" if gripper_type is not None else ""
+        return SuccessResponse(
+            success=True,
+            message=f"Gripper release command sent at speed {speed}{gripper_type_msg}",
+            timestamp=get_current_timestamp()
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to release gripper: {str(e)}"
+        )
+
+
+@app.put("/gripper/state", response_model=SuccessResponse, tags=["gripper"])
+async def set_gripper_state(request: GripperStateRequest):
+    """Set gripper state directly (0=open, 1=close, 10=release)."""
+    ensure_controller()
+
+    try:
+        controller.set_gripper_state(request.state, request.speed, request.gripper_type)
+        gripper_type_msg = f", gripper_type {request.gripper_type}" if request.gripper_type is not None else ""
+        return SuccessResponse(
+            success=True,
+            message=f"Gripper state set to {request.state} at speed {request.speed}{gripper_type_msg}",
+            timestamp=get_current_timestamp()
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to set gripper state: {str(e)}"
+        )
+
+
+@app.put("/gripper/value", response_model=SuccessResponse, tags=["gripper"])
+async def set_gripper_value(request: GripperValueRequest):
+    """Set gripper opening value (0-100)."""
+    ensure_controller()
+
+    try:
+        controller.set_gripper_value(request.value, request.speed, request.gripper_type)
+        gripper_type_msg = f", gripper_type {request.gripper_type}" if request.gripper_type is not None else ""
+        return SuccessResponse(
+            success=True,
+            message=f"Gripper value set to {request.value} at speed {request.speed}{gripper_type_msg}",
+            timestamp=get_current_timestamp()
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to set gripper value: {str(e)}"
+        )
+
+
+@app.post("/gripper/calibrate", response_model=SuccessResponse, tags=["gripper"])
+async def calibrate_gripper():
+    """Calibrate gripper and set current position as reference."""
+    ensure_controller()
+
+    try:
+        controller.calibrate_gripper()
+        return SuccessResponse(
+            success=True,
+            message="Gripper calibration completed",
+            timestamp=get_current_timestamp()
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to calibrate gripper: {str(e)}"
         )
 
 

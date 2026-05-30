@@ -147,4 +147,7 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
   - CORS-enabled HTTP server for browser compatibility
 
 ## Memories
+- Assumption: This project now uses MyCobot with a two-finger (parallel) gripper installed and connected.
+- Before running Python gripper commands, ensure the gripper hardware is mounted and recognized by the robot controller.
+- For two-finger gripper control in `pymycobot`, use gripper APIs with `gripper_type=3` where applicable (parallel gripper), based on Elephant Robotics docs: https://docs.elephantrobotics.com/docs/mycobot-280-JN-en/3-FunctionsAndApplications/6.developmentGuide/python/6_gripper.html
 - to memorize

@@ -21,8 +21,14 @@
       "Bash(.venv/bin/pip install:*)",
       "Bash(ls:*)",
       "Bash(apt list:*)",
-      "Bash(source:*)"
+      "Bash(source:*)",
+      "Bash(v4l2-ctl:*)",
+      "Bash(wget:*)",
+      "Bash(cp:*)"
     ],
-    "deny": []
+    "deny": [],
+    "additionalDirectories": [
+      "/tmp"
+    ]
   }
 }

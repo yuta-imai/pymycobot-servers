@@ -1,8 +1,8 @@
 """
 MyCobot Joint Controller Module
 
-This module provides functions to control individual joints of a MyCobot robot
-using the pymycobot library.
+This module provides functions to control individual joints and gripper of a
+MyCobot robot using the pymycobot library.
 """
 
 from pymycobot import MyCobot
@@ -33,6 +33,10 @@ class MyCobotJointController:
             5: (-165, 165),   # Joint 5 (Wrist 2)
             6: (-175, 175)    # Joint 6 (Wrist 3)
         }
+
+        # Gripper limits and valid values
+        self.gripper_value_limits = (0, 100)
+        self.valid_gripper_states = {0, 1, 10}  # 0=open, 1=close, 10=release
     
     def _validate_joint_number(self, joint_num: int) -> None:
         """Validate joint number is within valid range."""
@@ -46,6 +50,28 @@ class MyCobotJointController:
         if not (min_angle <= angle <= max_angle):
             raise ValueError(f"Angle {angle} out of range for joint {joint_num}. "
                            f"Valid range: {min_angle} to {max_angle} degrees")
+
+    def _validate_speed(self, speed: int) -> None:
+        """Validate speed is within valid range."""
+        if not (1 <= speed <= 100):
+            raise ValueError("Speed must be between 1-100")
+
+    def _validate_gripper_value(self, value: int) -> None:
+        """Validate gripper opening value is within valid range."""
+        min_value, max_value = self.gripper_value_limits
+        if not (min_value <= value <= max_value):
+            raise ValueError(
+                f"Gripper value must be between {min_value}-{max_value}, got {value}"
+            )
+
+    def _validate_gripper_type(self, gripper_type: Optional[int], allow_dexterous: bool = True) -> None:
+        """Validate gripper type if provided."""
+        if gripper_type is None:
+            return
+
+        valid_types = {1, 2, 3, 4} if allow_dexterous else {1, 3, 4}
+        if gripper_type not in valid_types:
+            raise ValueError(f"Invalid gripper_type {gripper_type}. Valid values: {sorted(valid_types)}")
     
     def move_joint(self, joint_num: int, angle: float, speed: int = 50) -> None:
         """
@@ -57,9 +83,8 @@ class MyCobotJointController:
             speed: Movement speed (1-100)
         """
         self._validate_angle(joint_num, angle)
-        if not (1 <= speed <= 100):
-            raise ValueError("Speed must be between 1-100")
-        
+        self._validate_speed(speed)
+
         self.mc.send_angle(joint_num, angle, speed)
     
     def get_joint_angle(self, joint_num: int) -> float:
@@ -102,6 +127,60 @@ class MyCobotJointController:
     def move_joint_6(self, angle: float, speed: int = 50) -> None:
         """Move Joint 6 (Wrist 3) to specified angle."""
         self.move_joint(6, angle, speed)
+
+    def set_gripper_state(self, flag: int, speed: int = 50, gripper_type: Optional[int] = None) -> None:
+        """
+        Set gripper state.
+
+        Args:
+            flag: 0=open, 1=close, 10=release
+            speed: Movement speed (1-100)
+            gripper_type: 1=adaptive, 2=5-finger dexterous, 3=parallel, 4=flexible
+        """
+        if flag not in self.valid_gripper_states:
+            raise ValueError("Gripper state must be 0 (open), 1 (close), or 10 (release)")
+
+        self._validate_speed(speed)
+        self._validate_gripper_type(gripper_type, allow_dexterous=True)
+
+        if gripper_type is None:
+            self.mc.set_gripper_state(flag, speed)
+        else:
+            self.mc.set_gripper_state(flag, speed, gripper_type)
+
+    def open_gripper(self, speed: int = 50, gripper_type: Optional[int] = None) -> None:
+        """Open gripper."""
+        self.set_gripper_state(0, speed, gripper_type)
+
+    def close_gripper(self, speed: int = 50, gripper_type: Optional[int] = None) -> None:
+        """Close gripper."""
+        self.set_gripper_state(1, speed, gripper_type)
+
+    def release_gripper(self, speed: int = 50, gripper_type: Optional[int] = None) -> None:
+        """Release gripper (torque off behavior supported by firmware)."""
+        self.set_gripper_state(10, speed, gripper_type)
+
+    def set_gripper_value(self, value: int, speed: int = 50, gripper_type: Optional[int] = None) -> None:
+        """
+        Set gripper opening value.
+
+        Args:
+            value: Opening value (0-100)
+            speed: Movement speed (1-100)
+            gripper_type: 1=adaptive, 3=parallel, 4=flexible
+        """
+        self._validate_gripper_value(value)
+        self._validate_speed(speed)
+        self._validate_gripper_type(gripper_type, allow_dexterous=False)
+
+        if gripper_type is None:
+            self.mc.set_gripper_value(value, speed)
+        else:
+            self.mc.set_gripper_value(value, speed, gripper_type)
+
+    def calibrate_gripper(self) -> None:
+        """Calibrate gripper and set current position as reference."""
+        self.mc.set_gripper_calibration()
     
     def get_all_joint_angles(self) -> List[float]:
         """Get current angles of all joints."""
@@ -121,10 +200,12 @@ class MyCobotJointController:
         """
         if len(angles) != 6:
             raise ValueError("Must provide exactly 6 angles")
-        
+
+        self._validate_speed(speed)
+
         for i, angle in enumerate(angles, 1):
             self._validate_angle(i, angle)
-        
+
         self.mc.send_angles(angles, speed)
     
     def home_position(self, speed: int = 50) -> None:
@@ -144,7 +225,8 @@ class MyCobotJointController:
         self._validate_joint_number(joint_num)
         if direction not in [-1, 1]:
             raise ValueError("Direction must be 1 or -1")
-        
+        self._validate_speed(speed)
+
         self.mc.jog_angle(joint_num, direction, speed)
     
     def stop_joint(self, joint_num: int) -> None:
@@ -179,7 +261,7 @@ class MyCobotJointController:
 
 
 # Convenience functions for direct usage without class instantiation
-def create_controller(port: str = "/dev/ttyUSB0", baudrate: int = 115200) -> MyCobotJointController:
+def create_controller(port: str = "/dev/ttyACM0", baudrate: int = 115200) -> MyCobotJointController:
     """Create and return a MyCobotJointController instance."""
     return MyCobotJointController(port, baudrate)
 
@@ -213,6 +295,15 @@ if __name__ == "__main__":
         print(f"Moving all joints to: {target_angles}")
         controller.move_all_joints(target_angles)
         controller.wait_for_completion()
+
+        # Gripper operations
+        print("Opening gripper...")
+        controller.open_gripper()
+        time.sleep(1.0)
+
+        print("Closing gripper...")
+        controller.close_gripper()
+        time.sleep(1.0)
         
     finally:
         # Return to home and close connection
