@@ -1,0 +1,8 @@
+opencv-python
+pymycobot
+numpy
+fastapi
+uvicorn[standard]
+pydantic
+mcp
+aiohttp
