@@ -69,6 +69,28 @@ python mycobot_api_server.py --robot-port /dev/ttyACM0 --robot-baudrate 115200
 python mycobot_api_server.py --reload
 ```
 
+#### Managed start/stop (recommended)
+
+`mycobot_server_ctl.py` supervises the API server (which owns the robot
+controller and serial connection) as one atomic unit: startup is **health-gated**
+(it only reports success once `/health` answers), and shutdown is **guaranteed**
+(the whole process group is stopped gracefully, then force-killed if needed, so
+the serial port is always released and no uvicorn workers are orphaned).
+
+```bash
+# Background daemon
+python mycobot_server_ctl.py start      # health-gated start, writes a PID file
+python mycobot_server_ctl.py status     # running? healthy? robot connected?
+python mycobot_server_ctl.py restart
+python mycobot_server_ctl.py stop       # graceful stop, releases the serial port
+
+# Foreground (Ctrl-C stops everything cleanly)
+python mycobot_server_ctl.py run
+
+# Same server/robot options as mycobot_api_server.py are forwarded:
+python mycobot_server_ctl.py start --port 8080 --robot-port /dev/ttyACM0
+```
+
 #### API Documentation
 
 Once the server is running, access the interactive API documentation:
@@ -276,6 +298,7 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── mycobot_joint_controller.py    # Core joint control module
 ├── rtsp_camera_server.py          # RTSP streaming server
 ├── mycobot_api_server.py          # REST API server
+├── mycobot_server_ctl.py          # Atomic start/stop wrapper for the API server
 ├── mycobot_api_spec.yaml          # OpenAPI specification
 ├── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript)
 ├── requirements.txt               # Python dependencies

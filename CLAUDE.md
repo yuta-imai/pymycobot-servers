@@ -15,6 +15,7 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 ├── rtsp_camera_server.py          # RTSP camera streaming server
 ├── mycobot_api_spec.yaml          # OpenAPI specification for REST API
 ├── mycobot_api_server.py          # REST API server (FastAPI)
+├── mycobot_server_ctl.py          # Atomic start/stop wrapper for the API server
 └── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript, separate runtime)
 ```
 
@@ -33,6 +34,10 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
   - With custom host/port: `python mycobot_api_server.py --host 0.0.0.0 --port 8080`
   - API docs available at: `http://localhost:8080/docs`
   - View all options: `python mycobot_api_server.py --help`
+- Managed start/stop (recommended): `python mycobot_server_ctl.py {start|stop|restart|status|run}`
+  - `start` is health-gated (waits for `/health`); `stop` tears down the whole process group gracefully so the serial port is always released
+  - `run` runs in the foreground; Ctrl-C stops the server cleanly
+  - Forwards the same `--host/--port/--robot-port/--robot-baudrate/--reload` options to the server
 - Import modules:
   - `from mycobot_joint_controller import MyCobotJointController`
   - `from rtsp_camera_server import RTSPCameraServer`
@@ -69,6 +74,12 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 - **External Access**: Serves on `0.0.0.0:8080` by default for network access
 - **Interactive Docs**: Swagger UI available at `/docs` endpoint
 - **CORS Enabled**: Supports cross-origin requests for web applications
+
+### Server Control Wrapper (`mycobot_server_ctl.py`)
+- **Atomic supervisor**: Manages `mycobot_api_server.py` (which owns the robot controller/serial connection) as a single unit; stdlib-only, no extra dependencies
+- **Health-gated start**: `start` only reports success once `/health` responds, otherwise the child is torn down — no half-started state
+- **Guaranteed shutdown**: Spawns the server in its own session/process group (`start_new_session`) and stops it with `SIGTERM` → graceful window → `SIGKILL`, so the serial port is released and uvicorn workers are never orphaned (including on Ctrl-C during startup)
+- **PID-file lifecycle**: `start/stop/restart/status` with stale-PID detection; LSB-style exit codes (`status` returns 3 when stopped)
 
 ### MCP Server (`mcp-server/`)
 - **Separate Node/TypeScript runtime**: Published to npm, run via `npx`; intended mainly for Claude Desktop (stdio transport)
