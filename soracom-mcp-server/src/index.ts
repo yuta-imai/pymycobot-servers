@@ -2,8 +2,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createServer } from "./server.js";
 
 const DEFAULT_API_BASE_URL = "https://api.soracom.io";
-const DEFAULT_LIVE_VIEW_PATH = "/v1/livestream/subscriptions/{subscriptionId}/view";
-const DEFAULT_STILL_IMAGE_PATH = "/v1/livestream/subscriptions/{subscriptionId}/image";
+const DEFAULT_LIVE_VIEW_PATH = "/v1/liveStreaming/subscribers/{subscriptionId}/viewUnlimited";
+const DEFAULT_STILL_IMAGE_PATH = "/v1/liveStreaming/subscribers/{subscriptionId}/stillImage";
+const DEFAULT_LIVE_VIEW_EXPIRES_QUERY = "expiresInSeconds";
+const DEFAULT_STILL_IMAGE_WIDTH_QUERY = "width";
+const DEFAULT_STILL_IMAGE_HEIGHT_QUERY = "height";
 
 function findArg(argv: string[], key: string): string | undefined {
   const flagIndex = argv.indexOf(key);
@@ -44,6 +47,18 @@ async function main(): Promise<void> {
     bearerToken: process.env.SORACOM_BEARER_TOKEN,
     liveViewPathTemplate,
     stillImagePathTemplate,
+    liveViewExpiresQueryName:
+      findArg(args, "--live-view-expires-query") ??
+      process.env.SORACOM_LIVE_VIEW_EXPIRES_QUERY ??
+      DEFAULT_LIVE_VIEW_EXPIRES_QUERY,
+    stillImageWidthQueryName:
+      findArg(args, "--still-image-width-query") ??
+      process.env.SORACOM_STILL_IMAGE_WIDTH_QUERY ??
+      DEFAULT_STILL_IMAGE_WIDTH_QUERY,
+    stillImageHeightQueryName:
+      findArg(args, "--still-image-height-query") ??
+      process.env.SORACOM_STILL_IMAGE_HEIGHT_QUERY ??
+      DEFAULT_STILL_IMAGE_HEIGHT_QUERY,
   });
 
   const transport = new StdioServerTransport();

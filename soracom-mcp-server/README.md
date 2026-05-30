@@ -18,14 +18,20 @@ Node.js / TypeScript 製サーバーです。
 - `SORACOM_API_KEY`
 - `SORACOM_TOKEN`
 - `SORACOM_BEARER_TOKEN` (optional)
-- `SORACOM_LIVE_VIEW_PATH` (default: `/v1/livestream/subscriptions/{subscriptionId}/view`)
-- `SORACOM_STILL_IMAGE_PATH` (default: `/v1/livestream/subscriptions/{subscriptionId}/image`)
+- `SORACOM_LIVE_VIEW_PATH` (default: `/v1/liveStreaming/subscribers/{subscriptionId}/viewUnlimited`)
+- `SORACOM_STILL_IMAGE_PATH` (default: `/v1/liveStreaming/subscribers/{subscriptionId}/stillImage`)
+- `SORACOM_LIVE_VIEW_EXPIRES_QUERY` (default: `expiresInSeconds`)
+- `SORACOM_STILL_IMAGE_WIDTH_QUERY` (default: `width`)
+- `SORACOM_STILL_IMAGE_HEIGHT_QUERY` (default: `height`)
 
 CLI オプション:
 
 - `--api-base-url`
 - `--live-view-path`
 - `--still-image-path`
+- `--live-view-expires-query`
+- `--still-image-width-query`
+- `--still-image-height-query`
 
 ## 開発
 

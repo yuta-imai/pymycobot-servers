@@ -5,6 +5,9 @@ export interface SoracomClientOptions {
   bearerToken?: string;
   liveViewPathTemplate: string;
   stillImagePathTemplate: string;
+  liveViewExpiresQueryName: string;
+  stillImageWidthQueryName: string;
+  stillImageHeightQueryName: string;
 }
 
 export class ApiError extends Error {
@@ -31,7 +34,7 @@ export class SoracomClient {
   }) {
     const query: Record<string, QueryValue> = {};
     if (params.expiresInSeconds !== undefined) {
-      query.expiresInSeconds = { value: params.expiresInSeconds };
+      query[this.options.liveViewExpiresQueryName] = { value: params.expiresInSeconds };
     }
 
     const response = await this.request(
@@ -60,10 +63,10 @@ export class SoracomClient {
   }) {
     const query: Record<string, QueryValue> = {};
     if (params.width !== undefined) {
-      query.width = { value: params.width };
+      query[this.options.stillImageWidthQueryName] = { value: params.width };
     }
     if (params.height !== undefined) {
-      query.height = { value: params.height };
+      query[this.options.stillImageHeightQueryName] = { value: params.height };
     }
 
     const response = await this.request(

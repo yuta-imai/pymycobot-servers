@@ -9,6 +9,9 @@ export interface ServerOptions {
   bearerToken?: string;
   liveViewPathTemplate: string;
   stillImagePathTemplate: string;
+  liveViewExpiresQueryName: string;
+  stillImageWidthQueryName: string;
+  stillImageHeightQueryName: string;
 }
 
 export function createServer(options: ServerOptions): McpServer {
@@ -24,6 +27,9 @@ export function createServer(options: ServerOptions): McpServer {
     bearerToken: options.bearerToken,
     liveViewPathTemplate: options.liveViewPathTemplate,
     stillImagePathTemplate: options.stillImagePathTemplate,
+    liveViewExpiresQueryName: options.liveViewExpiresQueryName,
+    stillImageWidthQueryName: options.stillImageWidthQueryName,
+    stillImageHeightQueryName: options.stillImageHeightQueryName,
   });
   registerTools(server, client);
 
