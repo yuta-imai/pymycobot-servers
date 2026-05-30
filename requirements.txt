@@ -4,5 +4,3 @@ numpy
 fastapi
 uvicorn[standard]
 pydantic
-mcp
-aiohttp

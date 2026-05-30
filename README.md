@@ -8,7 +8,6 @@ A comprehensive robotics control system for MyCobot arms with camera streaming a
 - **Gripper Control**: Open/close/release operations and value-based gripper positioning
 - **Camera Streaming**: RTSP video streaming from Raspberry Pi camera
 - **REST API**: HTTP-based remote control with OpenAPI specification
-- **MCP Server**: Model Context Protocol integration for AI systems
 - **Safety Features**: Angle validation, joint limits, and emergency stops
 
 ## Installation
@@ -122,134 +121,6 @@ curl -X POST "http://localhost:8080/robot/stop"
 # Get robot status
 curl http://localhost:8080/robot/status
 ```
-
-### 4. MCP Server
-
-The MCP (Model Context Protocol) server provides integration with external AI systems by exposing MyCobot control as structured tools and prompts.
-
-```bash
-# Start MCP server (connects to REST API server)
-python mycobot_mcp_server.py
-
-# Custom API server connection
-python mycobot_mcp_server.py --api-host 192.168.1.100 --api-port 8080
-```
-
-#### MCP Server Features
-
-- **9 Control Tools**: Joint movement, position reading, jogging, and emergency stop
-- **3 Built-in Prompts**: Robot status, joint information, and movement examples
-- **REST API Integration**: Communicates with MyCobot through the REST API server
-- **Error Handling**: Comprehensive error reporting and validation
-- **Safety Features**: Input validation and movement limits
-
-#### Available MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `get_joint_angle` | Get current angle of specific joint (1-6) |
-| `move_joint` | Move specific joint to target angle |
-| `get_all_joint_angles` | Get current angles of all joints |
-| `move_all_joints` | Move all joints simultaneously |
-| `home_position` | Move all joints to home position (0°) |
-| `stop_robot` | Emergency stop for all movements |
-| `jog_joint` | Jog joint in specified direction |
-| `wait_for_completion` | Wait for movement to complete |
-| `get_robot_status` | Get comprehensive robot status |
-
-#### Available MCP Prompts
-
-| Prompt | Description |
-|--------|-------------|
-| `robot_status` | Get comprehensive robot status information |
-| `joint_info` | Get information about robot joints and limits |
-| `basic_movements` | Examples of basic robot movements |
-
-#### Claude Desktop Integration
-
-To use the MCP server with Claude Desktop, add this configuration to your Claude Desktop settings:
-
-```json
-{
-  "mcpServers": {
-    "mycobot-controller": {
-      "command": "docker",
-      "args": [
-        "run", "--rm", "-i",
-        "--network", "host",
-        "your-dockerhub-username/mycobot-mcp-server:latest",
-        "--api-host", "192.168.1.100",
-        "--api-port", "8080"
-      ]
-    }
-  }
-}
-```
-
-For localhost API server (default):
-
-```json
-{
-  "mcpServers": {
-    "mycobot-controller": {
-      "command": "docker",
-      "args": [
-        "run", "--rm", "-i",
-        "--network", "host",
-        "imaifactory/pymycobot-mcp-server:latest",
-        "--api-host", "localhost",
-        "--api-port", "8080"
-      ]
-    }
-  }
-}
-```
-
-For local development without Docker:
-
-```json
-{
-  "mcpServers": {
-    "mycobot-controller": {
-      "command": "python",
-      "args": ["/path/to/your/project/mycobot_mcp_server.py"],
-      "env": {
-        "PYTHONPATH": "/path/to/your/project"
-      }
-    }
-  }
-}
-```
-
-#### Docker Setup
-
-Create a `Dockerfile` for the MCP server:
-
-```dockerfile
-FROM python:3.9-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY mycobot_mcp_server.py .
-CMD ["python", "mycobot_mcp_server.py"]
-```
-
-Build and push to Docker Hub:
-
-```bash
-# Build the image
-docker build -t your-dockerhub-username/mycobot-mcp-server:latest .
-
-# Push to Docker Hub
-docker push your-dockerhub-username/mycobot-mcp-server:latest
-```
-
-**Prerequisites for MCP Server:**
-1. MyCobot REST API server must be running (`python mycobot_api_server.py`)
-2. MyCobot robot must be connected and accessible
-3. Network connectivity between MCP server and API server
 
 ## API Reference
 
@@ -382,7 +253,6 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── mycobot_joint_controller.py    # Core joint control module
 ├── rtsp_camera_server.py          # RTSP streaming server
 ├── mycobot_api_server.py          # REST API server
-├── mycobot_mcp_server.py          # MCP server
 ├── mycobot_api_spec.yaml          # OpenAPI specification
 ├── requirements.txt               # Python dependencies
 └── README.md                      # This file
