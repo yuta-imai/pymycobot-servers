@@ -16,6 +16,7 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 ├── mycobot_api_spec.yaml          # OpenAPI specification for REST API
 ├── mycobot_api_server.py          # REST API server (FastAPI)
 ├── mycobot_server_ctl.py          # Atomic start/stop wrapper for the API server
+├── mycobot_server_ctl.sh          # Shell entry point (activates venv/pyenv, then runs the wrapper)
 └── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript, separate runtime)
 ```
 
@@ -38,6 +39,9 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
   - `start` is health-gated (waits for `/health`); `stop` tears down the whole process group gracefully so the serial port is always released
   - `run` runs in the foreground; Ctrl-C stops the server cleanly
   - Forwards the same `--host/--port/--robot-port/--robot-baudrate/--reload` options to the server
+- Shell entry point: `./mycobot_server_ctl.sh {start|stop|restart|status|run|env}`
+  - Activates the Python environment before running: `$PYTHON_BIN` → `./.venv` (or `$VENV_DIR`) → pyenv (respects `.python-version`) → system `python3`
+  - `env` prints the resolved interpreter; `exec`s the Python wrapper so signals reach `run` directly
 - Import modules:
   - `from mycobot_joint_controller import MyCobotJointController`
   - `from rtsp_camera_server import RTSPCameraServer`
@@ -80,6 +84,7 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 - **Health-gated start**: `start` only reports success once `/health` responds, otherwise the child is torn down — no half-started state
 - **Guaranteed shutdown**: Spawns the server in its own session/process group (`start_new_session`) and stops it with `SIGTERM` → graceful window → `SIGKILL`, so the serial port is released and uvicorn workers are never orphaned (including on Ctrl-C during startup)
 - **PID-file lifecycle**: `start/stop/restart/status` with stale-PID detection; LSB-style exit codes (`status` returns 3 when stopped)
+- **Shell entry point** (`mycobot_server_ctl.sh`): resolves/activates the Python environment (explicit `PYTHON_BIN` → project venv → pyenv with `.python-version` → system `python3`), then `exec`s the Python wrapper
 
 ### MCP Server (`mcp-server/`)
 - **Separate Node/TypeScript runtime**: Published to npm, run via `npx`; intended mainly for Claude Desktop (stdio transport)

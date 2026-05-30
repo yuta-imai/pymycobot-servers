@@ -91,6 +91,26 @@ python mycobot_server_ctl.py run
 python mycobot_server_ctl.py start --port 8080 --robot-port /dev/ttyACM0
 ```
 
+#### Shell wrapper (handles the Python environment)
+
+For deployments that use a virtualenv or **pyenv**, `mycobot_server_ctl.sh`
+activates the right Python environment first, then forwards to the control
+script above. It looks for an interpreter in this order: `$PYTHON_BIN` →
+project `./.venv` (or `$VENV_DIR`) → pyenv (respecting `.python-version`) →
+system `python3`.
+
+```bash
+./mycobot_server_ctl.sh start            # activates env, then starts
+./mycobot_server_ctl.sh status
+./mycobot_server_ctl.sh run
+./mycobot_server_ctl.sh stop
+./mycobot_server_ctl.sh env              # show which Python is resolved
+
+# Overrides
+PYTHON_BIN=/usr/bin/python3 ./mycobot_server_ctl.sh start
+VENV_DIR=/opt/venvs/mycobot  ./mycobot_server_ctl.sh start
+```
+
 #### API Documentation
 
 Once the server is running, access the interactive API documentation:
@@ -299,6 +319,7 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── rtsp_camera_server.py          # RTSP streaming server
 ├── mycobot_api_server.py          # REST API server
 ├── mycobot_server_ctl.py          # Atomic start/stop wrapper for the API server
+├── mycobot_server_ctl.sh          # Shell entry point (activates venv/pyenv, then runs the wrapper)
 ├── mycobot_api_spec.yaml          # OpenAPI specification
 ├── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript)
 ├── requirements.txt               # Python dependencies
