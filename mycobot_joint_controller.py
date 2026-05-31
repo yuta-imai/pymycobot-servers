@@ -59,9 +59,17 @@ class MyCobotJointController:
         self.gripper_value_limits = (0, 100)
         self.valid_gripper_states = {0, 1, 10}  # 0=open, 1=close, 10=release
 
+        # Cartesian workspace limits for the MyCobot 280, from pymycobot
+        # robot_info.py (key "MyCobot280"): [x, y, z] in mm, [rx, ry, rz] in deg.
+        self.coords_min = [-350.0, -350.0, -70.0, -180.0, -180.0, -180.0]
+        self.coords_max = [350.0, 350.0, 523.9, 180.0, 180.0, 180.0]
+
         # Last commanded target (6-element vector), used by wait_for_completion.
         # last-write-wins: every motion command overwrites it.
         self.last_target: Optional[List[float]] = None
+
+        # Last commanded Cartesian target, used by wait_for_coords_completion.
+        self.last_coords_target: Optional[List[float]] = None
 
         # Last sampled (timestamp, angles) for stateful is_moving computation.
         self._last_angle_sample: Optional[Tuple[float, List[float]]] = None
@@ -313,12 +321,23 @@ class MyCobotJointController:
         return bool(result)
     
     def get_all_joint_angles(self) -> List[float]:
-        """Get current angles of all joints."""
-        angles = self.mc.get_angles()
-        # Handle case where robot returns -1 on communication failure
-        if angles == -1 or angles is None:
-            return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Return default/safe angles
-        return angles
+        """Get current angles of all joints.
+
+        Retries a few times: pymycobot's get_angles() can intermittently return
+        -1/None or raise on a transient serial read. After retries are exhausted
+        it raises RuntimeError (rather than fabricating an all-zeros home pose)
+        so the REST layer surfaces a 503 and motion/IK logic never acts on fake
+        angles. Callers that can tolerate a miss (poll loops) should catch it.
+        """
+        for _ in range(3):
+            try:
+                angles = self.mc.get_angles()
+            except Exception:
+                angles = None
+            if isinstance(angles, (list, tuple)) and len(angles) == 6:
+                return list(angles)
+            time.sleep(0.05)
+        raise RuntimeError("Failed to read joint angles from robot")
     
     def move_all_joints(self, angles: List[float], speed: int = 50) -> None:
         """
@@ -469,7 +488,10 @@ class MyCobotJointController:
         history = deque()  # (timestamp, angles)
         while True:
             now = time.monotonic()
-            cur = self.get_all_joint_angles()
+            try:
+                cur = self.get_all_joint_angles()
+            except RuntimeError:
+                cur = None
             if cur is None or len(cur) != len(target):
                 # Transient read failure; retry until timeout.
                 if now - start > timeout:
@@ -502,6 +524,251 @@ class MyCobotJointController:
                 self._force_stop()
                 return {"completed": False, "reason": "timeout",
                         "elapsed": now - start, "max_error": err}
+
+            time.sleep(poll)
+
+    # ------------------------------------------------------------------
+    # Cartesian (coordinate-space) control
+    # ------------------------------------------------------------------
+
+    # Labels for the 6-element coords vector [x, y, z, rx, ry, rz].
+    _COORD_LABELS = ("x", "y", "z", "rx", "ry", "rz")
+
+    @staticmethod
+    def _angle_delta(a: float, b: float) -> float:
+        """Smallest absolute difference between two angles in degrees (wraps ±180)."""
+        return abs((a - b + 180.0) % 360.0 - 180.0)
+
+    @staticmethod
+    def _wrap_angle(a: float) -> float:
+        """Normalize an angle into [-180, 180)."""
+        return (a + 180.0) % 360.0 - 180.0
+
+    def _read_coords(self, retries: int = 3) -> Optional[List[float]]:
+        """Read the current Cartesian pose, or None on failure.
+
+        pymycobot 4.0.0 get_coords() returns [x, y, z, rx, ry, rz] (mm / deg),
+        or the int -1 (read retries exhausted) / None (frame parse failure).
+        Any of those, a wrong length, or an exception is reported as None so the
+        caller can retry instead of acting on a bad reading. Note -1 is truthy,
+        so an isinstance/len check (not `if not coords`) is required.
+        """
+        for _ in range(max(1, retries)):
+            try:
+                coords = self.mc.get_coords()
+            except Exception:
+                coords = None
+            if isinstance(coords, (list, tuple)) and len(coords) == 6:
+                return list(coords)
+            time.sleep(0.05)
+        return None
+
+    def get_coords(self, retries: int = 3) -> List[float]:
+        """Return the current Cartesian pose [x, y, z, rx, ry, rz] (mm / deg).
+
+        Raises RuntimeError if the pose cannot be read, so the REST layer
+        surfaces a 503 instead of a fabricated pose.
+        """
+        coords = self._read_coords(retries=retries)
+        if coords is None:
+            raise RuntimeError("Failed to read coordinates from robot")
+        return coords
+
+    def _validate_coords(self, coords: List[float]) -> None:
+        """Validate a 6-element Cartesian target against the 280 workspace box."""
+        if len(coords) != 6:
+            raise ValueError(
+                f"Must provide exactly 6 coords [x,y,z,rx,ry,rz], got {len(coords)}"
+            )
+        for value, lo, hi, label in zip(coords, self.coords_min,
+                                        self.coords_max, self._COORD_LABELS):
+            if not (lo <= value <= hi):
+                raise ValueError(
+                    f"Coord {label}={value} out of workspace range [{lo}, {hi}]"
+                )
+
+    def send_coords(self, coords: List[float], speed: int = 30, mode: int = 0) -> None:
+        """Move the end-effector to an absolute Cartesian pose (non-blocking).
+
+        Args:
+            coords: [x, y, z, rx, ry, rz] in mm / degrees.
+            speed: 1-100.
+            mode: 0 = angular (point-to-point, default), 1 = linear (straight line).
+
+        send_coords does NOT verify reachability; an in-range but unreachable
+        pose silently does not move (firmware error 32). Use check_pose_reachable()
+        before and wait_for_coords_completion() after.
+        """
+        coords = list(coords)
+        # Wrap the orientation triple into [-180, 180) so a yaw computed slightly
+        # past the boundary (e.g. 180.5) is accepted instead of rejected.
+        if len(coords) == 6:
+            coords[3:] = [self._wrap_angle(a) for a in coords[3:]]
+        self._validate_coords(coords)
+        self._validate_speed(speed)
+        if mode not in (0, 1):
+            raise ValueError("mode must be 0 (angular) or 1 (linear)")
+        self.last_coords_target = list(coords)
+        # pymycobot 4.0.0: always pass mode explicitly (omitting it sends no
+        # mode byte, which is undefined firmware behaviour).
+        self.mc.send_coords(list(coords), speed, mode)
+
+    def solve_ik(self, target_coords: List[float],
+                 current_angles: Optional[List[float]] = None,
+                 retries: int = 3) -> Optional[List[float]]:
+        """Return a 6-joint IK solution (degrees) for target_coords, or None.
+
+        Wraps pymycobot solve_inv_kinematics (firmware IK), which returns a
+        6-element angle list on success, or the int -1 / None when there is no
+        solution OR on a transient read failure; we retry and report None for
+        all non-solution outcomes.
+        """
+        if len(target_coords) != 6:
+            raise ValueError("target_coords must have 6 elements")
+        solver = getattr(self.mc, "solve_inv_kinematics", None)
+        if solver is None:
+            return None
+        for _ in range(max(1, retries)):
+            seed = self.get_all_joint_angles() if current_angles is None else list(current_angles)
+            try:
+                result = solver(list(target_coords), seed)
+            except Exception:
+                result = None
+            if isinstance(result, (list, tuple)) and len(result) == 6:
+                return list(result)
+            time.sleep(0.05)
+        return None
+
+    def check_pose_reachable(self, coords: List[float]
+                             ) -> Tuple[bool, str, Optional[List[float]]]:
+        """Decide, WITHOUT moving, whether a Cartesian pose is reachable.
+
+        Returns (ok, reason, ik_angles):
+          - (True,  "ok",          [angles]) when reachable,
+          - (False, "out_of_range", None)    if outside the workspace box,
+          - (False, "ik_failed",    None)    if firmware IK finds no solution,
+          - (False, "joint_limit",  [angles]) if the IK solution violates a limit.
+        """
+        coords = list(coords)
+        if len(coords) == 6:
+            coords[3:] = [self._wrap_angle(a) for a in coords[3:]]
+        try:
+            self._validate_coords(coords)
+        except ValueError:
+            return False, "out_of_range", None
+        ik = self.solve_ik(coords)
+        if ik is None:
+            return False, "ik_failed", None
+        for i, angle in enumerate(ik, 1):
+            lo, hi = self.joint_limits[i]
+            if not (lo <= angle <= hi):
+                return False, "joint_limit", ik
+        return True, "ok", ik
+
+    def wait_for_coords_completion(self, target_coords: Optional[List[float]] = None,
+                                   pos_tol: float = 3.0, ori_tol: float = 3.0,
+                                   timeout: float = 20.0, poll: float = 0.15,
+                                   stall_window: float = 2.5,
+                                   stall_min_progress: float = 1.0,
+                                   stall_min_ori_progress: float = 0.5) -> dict:
+        """Wait until the end-effector reaches target_coords (mm / deg).
+
+        Mirrors wait_for_completion but in Cartesian space. Terminal conditions:
+          1. converged      - position within pos_tol (mm) AND orientation within
+                              ori_tol (deg) -> success, no stop
+          2. ik_no_solution - firmware error 32/33/34 observed -> stop, failure
+          3. stalled        - net progress (position mm AND orientation deg)
+                              below threshold while not converged -> stop, failure
+          4. timeout        - exceeded timeout while not converged -> stop, failure
+          5. no_target      - no target known and none was ever commanded
+
+        Returns dict: completed, reason, elapsed, pos_error, ori_error.
+
+        Caveat: orientation error is a per-axis Euler comparison, not a true
+        SO(3) metric; near gimbal singularities (rx ≈ ±90, which the 280's home
+        pose sits at) it can overstate the error and delay convergence. Adequate
+        for v1 top-down grasps; revisit with quaternions if needed.
+        """
+        if target_coords is None:
+            target_coords = self.last_coords_target
+
+        start = time.monotonic()
+
+        # No known target: we cannot judge Cartesian convergence, so report it
+        # honestly rather than polling the unreliable is_moving() flag (which can
+        # stick at True and waste the whole timeout before a spurious stop).
+        if target_coords is None:
+            return {"completed": False, "reason": "no_target",
+                    "elapsed": time.monotonic() - start,
+                    "pos_error": None, "ori_error": None}
+
+        history = deque()  # (timestamp, [x, y, z])
+        last_err_check = 0.0
+        while True:
+            now = time.monotonic()
+            cur = self._read_coords(retries=2)
+            if cur is None:
+                # Transient read failure; retry until timeout.
+                if now - start > timeout:
+                    self._force_stop()
+                    return {"completed": False, "reason": "timeout",
+                            "elapsed": now - start,
+                            "pos_error": None, "ori_error": None}
+                time.sleep(poll)
+                continue
+
+            pos_error = max(abs(c - t) for c, t in zip(cur[:3], target_coords[:3]))
+            ori_error = max(self._angle_delta(c, t)
+                            for c, t in zip(cur[3:], target_coords[3:]))
+
+            # 1) converged -> success (already stopped, no stop needed)
+            if pos_error <= pos_tol and ori_error <= ori_tol:
+                return {"completed": True, "reason": "converged",
+                        "elapsed": now - start,
+                        "pos_error": pos_error, "ori_error": ori_error}
+
+            # 2) firmware fault -> stop early (throttled poll). 32/33/34 are
+            #    IK / linear-motion no-solution; 1-6 (joint limit) and 16-19
+            #    (collision) are surfaced as a generic robot_fault so the caller
+            #    is warned to inspect the arm instead of seeing a bare timeout.
+            if now - last_err_check > 1.0:
+                last_err_check = now
+                code, _ = self.describe_error()
+                if code in (32, 33, 34):
+                    self._force_stop()
+                    return {"completed": False, "reason": "ik_no_solution",
+                            "elapsed": now - start,
+                            "pos_error": pos_error, "ori_error": ori_error}
+                if code:
+                    self._force_stop()
+                    return {"completed": False, "reason": "robot_fault",
+                            "elapsed": now - start,
+                            "pos_error": pos_error, "ori_error": ori_error}
+
+            # 3) stall detection: net progress over the recent window in BOTH
+            #    position (mm) and orientation (deg). Both must be below their
+            #    thresholds to count as stalled, so a pure-reorientation move
+            #    (XYZ ~constant) is not falsely flagged.
+            history.append((now, list(cur)))
+            while history and now - history[0][0] > stall_window:
+                history.popleft()
+            if now - start > stall_window and len(history) >= 2:
+                ref = history[0][1]
+                pos_progress = max(abs(c - h) for c, h in zip(cur[:3], ref[:3]))
+                ori_progress = max(self._angle_delta(c, h)
+                                   for c, h in zip(cur[3:], ref[3:]))
+                if pos_progress < stall_min_progress and ori_progress < stall_min_ori_progress:
+                    self._force_stop()
+                    return {"completed": False, "reason": "stalled",
+                            "elapsed": now - start,
+                            "pos_error": pos_error, "ori_error": ori_error}
+
+            # 4) timeout -> cancel
+            if now - start > timeout:
+                self._force_stop()
+                return {"completed": False, "reason": "timeout",
+                        "elapsed": now - start,
+                        "pos_error": pos_error, "ori_error": ori_error}
 
             time.sleep(poll)
 

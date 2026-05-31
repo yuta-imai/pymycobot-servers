@@ -139,6 +139,66 @@ class WaitResponse(BaseModel):
     max_error: Optional[float] = None
 
 
+# Cartesian (coordinate-space) request/response models
+class MoveCoordsRequest(BaseModel):
+    coords: List[float] = Field(
+        ..., min_items=6, max_items=6,
+        description="Target pose [x, y, z, rx, ry, rz] in mm / degrees"
+    )
+    speed: int = Field(30, ge=1, le=100, description="Movement speed (1-100)")
+    mode: int = Field(
+        0, ge=0, le=1,
+        description="0 = angular (point-to-point), 1 = linear (straight-line)"
+    )
+    validate: bool = Field(
+        True,
+        description="Run a no-move IK reachability check before sending; reject unreachable poses with 400"
+    )
+
+
+class CoordsRequest(BaseModel):
+    coords: List[float] = Field(
+        ..., min_items=6, max_items=6,
+        description="Pose [x, y, z, rx, ry, rz] in mm / degrees"
+    )
+
+
+class WaitCoordsRequest(BaseModel):
+    target: Optional[List[float]] = Field(
+        None, min_items=6, max_items=6,
+        description="Optional explicit target pose [x,y,z,rx,ry,rz]. Defaults to the last commanded coords target."
+    )
+    pos_tolerance: float = Field(
+        3.0, ge=0.0, le=50.0, description="Position convergence tolerance in mm"
+    )
+    ori_tolerance: float = Field(
+        3.0, ge=0.0, le=45.0, description="Orientation convergence tolerance in degrees"
+    )
+    timeout: float = Field(
+        20.0, ge=0.1, le=60.0, description="Maximum time to wait in seconds"
+    )
+
+
+class CoordsResponse(BaseModel):
+    coords: List[float]
+    timestamp: str
+
+
+class WaitCoordsResponse(BaseModel):
+    completed: bool
+    elapsed_time: float
+    reason: str
+    pos_error: Optional[float] = None
+    ori_error: Optional[float] = None
+
+
+class ReachableResponse(BaseModel):
+    reachable: bool
+    reason: str
+    ik_angles: Optional[List[float]] = None
+    timestamp: str
+
+
 class ErrorResponse(BaseModel):
     error: str
     message: str
@@ -675,6 +735,116 @@ async def wait_for_completion(request: Optional[WaitRequest] = None):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to wait for completion: {str(e)}"
+        )
+
+
+# Cartesian (coordinate-space) endpoints
+@app.get("/robot/coords", response_model=CoordsResponse, tags=["robot"])
+async def get_coords():
+    """Get the current end-effector pose [x, y, z, rx, ry, rz] (mm / degrees)."""
+    ensure_controller()
+
+    try:
+        coords = controller.get_coords()
+        return CoordsResponse(coords=coords, timestamp=get_current_timestamp())
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=robot_error_detail("Failed to get coordinates", e),
+        )
+
+
+@app.put("/robot/coords", response_model=SuccessResponse, tags=["robot"])
+async def move_coords(request: MoveCoordsRequest):
+    """Move the end-effector to an absolute Cartesian pose (non-blocking).
+
+    The pose is validated against the workspace box before sending; use
+    POST /robot/coords/wait to wait for arrival.
+    """
+    ensure_controller()
+
+    try:
+        if request.validate:
+            reachable, reason, _ = controller.check_pose_reachable(request.coords)
+            if not reachable:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Target pose not reachable: {reason}",
+                )
+        controller.send_coords(request.coords, request.speed, request.mode)
+        mode_str = "linear" if request.mode == 1 else "angular"
+        return SuccessResponse(
+            success=True,
+            message=f"Moving to coords {request.coords} at speed {request.speed} ({mode_str})",
+            timestamp=get_current_timestamp(),
+        )
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=robot_error_detail("Failed to move to coords", e),
+        )
+
+
+@app.post("/robot/coords/check", response_model=ReachableResponse, tags=["robot"])
+async def check_coords_reachable(request: CoordsRequest):
+    """Check, WITHOUT moving, whether a Cartesian pose is reachable (firmware IK)."""
+    ensure_controller()
+
+    try:
+        reachable, reason, ik = controller.check_pose_reachable(request.coords)
+        return ReachableResponse(
+            reachable=reachable, reason=reason, ik_angles=ik,
+            timestamp=get_current_timestamp(),
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=robot_error_detail("Failed to check reachability", e),
+        )
+
+
+@app.post("/robot/coords/wait", response_model=WaitCoordsResponse, tags=["robot"])
+async def wait_for_coords(request: Optional[WaitCoordsRequest] = None):
+    """Wait until the end-effector reaches its Cartesian target.
+
+    Convergence is judged by position (mm) and orientation (deg) tolerance, with
+    firmware IK-fault detection, stall detection, and a hard timeout. On
+    fault/stall/timeout the robot is stopped before returning.
+    """
+    ensure_controller()
+
+    target = request.target if request else None
+    pos_tol = request.pos_tolerance if request else 3.0
+    ori_tol = request.ori_tolerance if request else 3.0
+    timeout = request.timeout if request else 20.0
+
+    # Validate an explicit target up front so a bad pose returns 400 rather than
+    # producing meaningless convergence math (and a 503) inside the wait loop.
+    if target is not None:
+        try:
+            controller._validate_coords(target)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    try:
+        result = controller.wait_for_coords_completion(
+            target_coords=target, pos_tol=pos_tol, ori_tol=ori_tol, timeout=timeout
+        )
+        return WaitCoordsResponse(
+            completed=result["completed"],
+            elapsed_time=result["elapsed"],
+            reason=result["reason"],
+            pos_error=result["pos_error"],
+            ori_error=result["ori_error"],
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to wait for coords completion: {str(e)}",
         )
 
 
