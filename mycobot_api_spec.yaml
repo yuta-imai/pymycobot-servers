@@ -403,6 +403,42 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /gripper/status:
+    get:
+      tags:
+        - gripper
+      summary: Get gripper status
+      description: Get current gripper opening value (0-100) and whether it is moving
+      operationId: get_gripper_status
+      parameters:
+        - name: gripper_type
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 4
+          description: "Gripper type (1=adaptive, 3=parallel, 4=flexible); firmware default when omitted"
+      responses:
+        '200':
+          description: Current gripper status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GripperStatusResponse'
+        '400':
+          description: Invalid gripper type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /robot/home:
     post:
       tags:
@@ -458,6 +494,14 @@ paths:
       summary: Get robot status
       description: Get current robot status including joint angles and movement state
       operationId: get_robot_status
+      parameters:
+        - name: include_error
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: "Also report the firmware error code/message (extra serial round-trip)"
       responses:
         '200':
           description: Current robot status
@@ -576,8 +620,39 @@ components:
           type: string
           format: date-time
           example: "2023-12-01T12:00:00Z"
+        error_code:
+          type: integer
+          nullable: true
+          example: null
+          description: "Firmware error code (only set when include_error=true and an error is present)"
+        error_message:
+          type: string
+          nullable: true
+          example: null
+          description: "Human-readable error description for error_code"
       required:
         - joint_angles
+        - is_moving
+        - timestamp
+
+    GripperStatusResponse:
+      type: object
+      properties:
+        value:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 100
+          description: "Current gripper opening value (0-100)"
+        is_moving:
+          type: boolean
+          example: false
+        timestamp:
+          type: string
+          format: date-time
+          example: "2023-12-01T12:00:00Z"
+      required:
+        - value
         - is_moving
         - timestamp
 
@@ -587,8 +662,8 @@ components:
         angle:
           type: number
           format: float
-          minimum: -175
-          maximum: 175
+          minimum: -180
+          maximum: 180
           example: 45.5
         speed:
           type: integer
@@ -635,6 +710,15 @@ components:
           maximum: 100
           default: 50
           example: 50
+        increment:
+          type: number
+          format: float
+          minimum: 0
+          exclusiveMinimum: true
+          maximum: 90
+          default: 5.0
+          example: 5.0
+          description: "Degrees to move per call (0 < increment <= 90)"
       required:
         - direction
 
@@ -656,9 +740,26 @@ components:
           format: float
           minimum: 0.1
           maximum: 60.0
-          default: 10.0
-          example: 10.0
+          default: 15.0
+          example: 15.0
           description: "Maximum time to wait in seconds"
+        tolerance:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 10.0
+          default: 1.0
+          example: 1.0
+          description: "Per-joint convergence tolerance in degrees"
+        target:
+          type: array
+          items:
+            type: number
+            format: float
+          minItems: 6
+          maxItems: 6
+          nullable: true
+          description: "Optional explicit 6-joint target. Defaults to the last commanded target."
 
     GripperActionRequest:
       type: object
@@ -735,15 +836,27 @@ components:
         completed:
           type: boolean
           example: true
-          description: "True if movement completed, False if timeout"
+          description: "True if the target was reached (converged), False otherwise"
         elapsed_time:
           type: number
           format: float
           example: 2.5
           description: "Actual time elapsed in seconds"
+        reason:
+          type: string
+          enum: [converged, stalled, timeout, idle]
+          example: converged
+          description: "Terminal condition: converged (success), stalled, timeout, or idle (legacy fallback)"
+        max_error:
+          type: number
+          format: float
+          nullable: true
+          example: 0.3
+          description: "Maximum per-joint error to target in degrees at return time (null if unknown)"
       required:
         - completed
         - elapsed_time
+        - reason
 
     SuccessResponse:
       type: object

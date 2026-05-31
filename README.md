@@ -8,6 +8,7 @@ A comprehensive robotics control system for MyCobot arms with camera streaming a
 - **Gripper Control**: Open/close/release operations and value-based gripper positioning
 - **Camera Streaming**: RTSP video streaming from Raspberry Pi camera
 - **REST API**: HTTP-based remote control with OpenAPI specification
+- **MCP Server**: Control the arm from Claude Desktop and other MCP clients (see [`mcp-server/`](mcp-server/))
 - **Safety Features**: Angle validation, joint limits, and emergency stops
 
 ## Installation
@@ -68,6 +69,48 @@ python mycobot_api_server.py --robot-port /dev/ttyACM0 --robot-baudrate 115200
 python mycobot_api_server.py --reload
 ```
 
+#### Managed start/stop (recommended)
+
+`mycobot_server_ctl.py` supervises the API server (which owns the robot
+controller and serial connection) as one atomic unit: startup is **health-gated**
+(it only reports success once `/health` answers), and shutdown is **guaranteed**
+(the whole process group is stopped gracefully, then force-killed if needed, so
+the serial port is always released and no uvicorn workers are orphaned).
+
+```bash
+# Background daemon
+python mycobot_server_ctl.py start      # health-gated start, writes a PID file
+python mycobot_server_ctl.py status     # running? healthy? robot connected?
+python mycobot_server_ctl.py restart
+python mycobot_server_ctl.py stop       # graceful stop, releases the serial port
+
+# Foreground (Ctrl-C stops everything cleanly)
+python mycobot_server_ctl.py run
+
+# Same server/robot options as mycobot_api_server.py are forwarded:
+python mycobot_server_ctl.py start --port 8080 --robot-port /dev/ttyACM0
+```
+
+#### Shell wrapper (handles the Python environment)
+
+For deployments that use a virtualenv or **pyenv**, `mycobot_server_ctl.sh`
+activates the right Python environment first, then forwards to the control
+script above. It looks for an interpreter in this order: `$PYTHON_BIN` →
+project `./.venv` (or `$VENV_DIR`) → pyenv (respecting `.python-version`) →
+system `python3`.
+
+```bash
+./mycobot_server_ctl.sh start            # activates env, then starts
+./mycobot_server_ctl.sh status
+./mycobot_server_ctl.sh run
+./mycobot_server_ctl.sh stop
+./mycobot_server_ctl.sh env              # show which Python is resolved
+
+# Overrides
+PYTHON_BIN=/usr/bin/python3 ./mycobot_server_ctl.sh start
+VENV_DIR=/opt/venvs/mycobot  ./mycobot_server_ctl.sh start
+```
+
 #### API Documentation
 
 Once the server is running, access the interactive API documentation:
@@ -122,6 +165,28 @@ curl -X POST "http://localhost:8080/robot/stop"
 curl http://localhost:8080/robot/status
 ```
 
+### 4. MCP Server (Claude Desktop)
+
+A standalone MCP server lets Claude Desktop (and other MCP clients) control the arm.
+It is a separate Node/TypeScript runtime that talks to the REST API above over HTTP —
+there is no code dependency on the Python code. It is published to npm and runs via
+`npx`, so no local build is required to use it:
+
+```json
+{
+  "mcpServers": {
+    "mycobot": {
+      "command": "npx",
+      "args": ["-y", "@yuta-imai/mycobot-mcp-server"],
+      "env": { "MYCOBOT_API_BASE_URL": "http://localhost:8080" }
+    }
+  }
+}
+```
+
+See [`mcp-server/`](mcp-server/) for the full tool list, configuration, and development
+instructions.
+
 ## API Reference
 
 ### REST API Endpoints
@@ -133,28 +198,29 @@ curl http://localhost:8080/robot/status
 | PUT | `/joints/{joint_num}/angle` | Move specific joint |
 | GET | `/joints/angles` | Get all joint angles |
 | PUT | `/joints/angles` | Move all joints |
-| POST | `/joints/{joint_num}/jog` | Jog joint in direction |
+| POST | `/joints/{joint_num}/jog` | Jog joint by a fixed increment (non-blocking) |
 | POST | `/gripper/open` | Open gripper |
 | POST | `/gripper/close` | Close gripper |
 | POST | `/gripper/release` | Release gripper |
 | PUT | `/gripper/state` | Set gripper state (0/1/10) |
 | PUT | `/gripper/value` | Set gripper opening value (0-100) |
 | POST | `/gripper/calibrate` | Calibrate gripper |
+| GET | `/gripper/status` | Get gripper value + moving state |
 | POST | `/robot/home` | Move to home position |
 | POST | `/robot/stop` | Emergency stop |
-| GET | `/robot/status` | Get robot status |
-| POST | `/robot/wait` | Wait for movement completion |
+| GET | `/robot/status` | Get robot status (`?include_error=true` for fault code) |
+| POST | `/robot/wait` | Wait for target (converged / stalled / timeout, auto-stop) |
 
 ### Joint Limits
 
 | Joint | Range | Description |
 |-------|-------|-------------|
-| 1 | -165° to +165° | Base rotation |
-| 2 | -165° to +165° | Shoulder |
-| 3 | -165° to +165° | Elbow |
-| 4 | -165° to +165° | Wrist 1 |
-| 5 | -165° to +165° | Wrist 2 |
-| 6 | -175° to +175° | Wrist 3 |
+| 1 | -168° to +168° | Base rotation |
+| 2 | -135° to +135° | Shoulder |
+| 3 | -150° to +150° | Elbow |
+| 4 | -145° to +145° | Wrist 1 |
+| 5 | -155° to +160° | Wrist 2 |
+| 6 | -180° to +180° | Wrist 3 |
 
 ### Speed Settings
 
@@ -253,8 +319,11 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── mycobot_joint_controller.py    # Core joint control module
 ├── rtsp_camera_server.py          # RTSP streaming server
 ├── mycobot_api_server.py          # REST API server
+├── mycobot_server_ctl.py          # Atomic start/stop wrapper for the API server
+├── mycobot_server_ctl.sh          # Shell entry point (activates venv/pyenv, then runs the wrapper)
 ├── soracom-mcp-server/            # MCP server for SORACOM live APIs
 ├── mycobot_api_spec.yaml          # OpenAPI specification
+├── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript)
 ├── requirements.txt               # Python dependencies
 └── README.md                      # This file
 ```

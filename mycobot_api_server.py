@@ -13,14 +13,13 @@ import uvicorn
 import argparse
 from datetime import datetime
 import logging
-import time
 
 from mycobot_joint_controller import MyCobotJointController
 
 
 # Pydantic models for request/response
 class MoveJointRequest(BaseModel):
-    angle: float = Field(..., ge=-175, le=175, description="Target angle in degrees")
+    angle: float = Field(..., ge=-180, le=180, description="Target angle in degrees")
     speed: int = Field(50, ge=1, le=100, description="Movement speed (1-100)")
 
 
@@ -32,12 +31,17 @@ class MoveAllJointsRequest(BaseModel):
 class JogJointRequest(BaseModel):
     direction: int = Field(..., description="1 for positive, -1 for negative direction")
     speed: int = Field(50, ge=1, le=100, description="Movement speed (1-100)")
+    increment: float = Field(
+        5.0, gt=0, le=90,
+        description="Degrees to move per call (0 < increment <= 90). Defaults to 5."
+    )
 
     class Config:
         schema_extra = {
             "example": {
                 "direction": 1,
-                "speed": 50
+                "speed": 50,
+                "increment": 5.0
             }
         }
 
@@ -47,7 +51,15 @@ class SpeedRequest(BaseModel):
 
 
 class WaitRequest(BaseModel):
-    timeout: float = Field(10.0, ge=0.1, le=60.0, description="Maximum time to wait in seconds")
+    timeout: float = Field(15.0, ge=0.1, le=60.0, description="Maximum time to wait in seconds")
+    tolerance: float = Field(
+        1.0, ge=0.0, le=10.0,
+        description="Per-joint convergence tolerance in degrees (default 1.0)"
+    )
+    target: Optional[List[float]] = Field(
+        None, min_items=6, max_items=6,
+        description="Optional explicit 6-joint target. Defaults to the last commanded target."
+    )
 
 
 class GripperActionRequest(BaseModel):
@@ -104,6 +116,14 @@ class RobotStatusResponse(BaseModel):
     joint_angles: List[float]
     is_moving: bool
     timestamp: str
+    error_code: Optional[int] = None
+    error_message: Optional[str] = None
+
+
+class GripperStatusResponse(BaseModel):
+    value: int
+    is_moving: bool
+    timestamp: str
 
 
 class SuccessResponse(BaseModel):
@@ -115,6 +135,8 @@ class SuccessResponse(BaseModel):
 class WaitResponse(BaseModel):
     completed: bool
     elapsed_time: float
+    reason: str
+    max_error: Optional[float] = None
 
 
 class ErrorResponse(BaseModel):
@@ -163,6 +185,25 @@ def ensure_controller():
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Robot controller not initialized"
         )
+
+
+def robot_error_detail(action: str, exc: Exception) -> str:
+    """Build a 503 detail string, enriched with the firmware error code/message.
+
+    Queries get_error_information() so a raw library error (e.g. a joint-limit
+    or collision fault) is reported with meaning instead of being passed through
+    opaquely. Only runs on the error path, so the extra serial round-trip is
+    acceptable.
+    """
+    detail = f"{action}: {exc}"
+    if controller is not None:
+        try:
+            code, message = controller.describe_error()
+        except Exception:
+            code, message = None, None
+        if code:
+            detail += f" [robot error {code}: {message}]"
+    return detail
 
 
 @app.on_event("startup")
@@ -253,7 +294,7 @@ async def move_joint(joint_num: int, request: MoveJointRequest):
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to move joint: {str(e)}"
+            detail=robot_error_detail(f"Failed to move joint {joint_num}", e)
         )
 
 
@@ -295,7 +336,7 @@ async def move_all_joints(request: MoveAllJointsRequest):
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to move joints: {str(e)}"
+            detail=robot_error_detail("Failed to move joints", e)
         )
 
 
@@ -317,17 +358,30 @@ async def jog_joint(joint_num: int, request: JogJointRequest):
         )
     
     try:
-        controller.joint_jog(joint_num, request.direction, request.speed)
+        target = controller.joint_jog(
+            joint_num, request.direction, request.speed, request.increment
+        )
         direction_str = "positive" if request.direction == 1 else "negative"
         return SuccessResponse(
             success=True,
-            message=f"Joint {joint_num} jogging in {direction_str} direction at speed {request.speed}",
+            message=(
+                f"Joint {joint_num} jogging {direction_str} by {request.increment}° "
+                f"to {target:.2f}° at speed {request.speed}"
+            ),
             timestamp=get_current_timestamp()
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
         )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to jog joint: {str(e)}"
+            detail=robot_error_detail(
+                f"Failed to jog joint {joint_num} (direction={request.direction}, "
+                f"increment={request.increment})", e
+            )
         )
 
 
@@ -503,7 +557,7 @@ async def home_position(request: Optional[SpeedRequest] = None):
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to move to home position: {str(e)}"
+            detail=robot_error_detail("Failed to move to home position", e)
         )
 
 
@@ -527,21 +581,31 @@ async def stop_all_joints():
 
 
 @app.get("/robot/status", response_model=RobotStatusResponse, tags=["robot"])
-async def get_robot_status():
-    """Get current robot status including joint angles and movement state."""
+async def get_robot_status(include_error: bool = False):
+    """Get current robot status including joint angles and movement state.
+
+    Set `include_error=true` to also report the firmware error code/message.
+    It is off by default to keep this hot endpoint fast (it costs an extra
+    serial round-trip).
+    """
     ensure_controller()
-    
+
     try:
         joint_angles = controller.get_all_joint_angles()
-        is_moving_result = controller.mc.is_moving()
-        
-        # Handle case where robot returns -1 on communication failure
-        is_moving = False if is_moving_result == -1 or is_moving_result is None else bool(is_moving_result)
-        
+        # Self-computed movement detection (compares successive angle samples)
+        # instead of the firmware is_moving() flag, which can stick at True.
+        is_moving = controller.compute_is_moving(joint_angles)
+
+        error_code, error_message = (None, None)
+        if include_error:
+            error_code, error_message = controller.describe_error()
+
         return RobotStatusResponse(
             joint_angles=joint_angles,
             is_moving=is_moving,
-            timestamp=get_current_timestamp()
+            timestamp=get_current_timestamp(),
+            error_code=error_code,
+            error_message=error_message,
         )
     except Exception as e:
         raise HTTPException(
@@ -550,21 +614,62 @@ async def get_robot_status():
         )
 
 
+@app.get("/gripper/status", response_model=GripperStatusResponse, tags=["gripper"])
+async def get_gripper_status(gripper_type: Optional[int] = None):
+    """Get current gripper opening value (0-100) and whether it is moving.
+
+    `gripper_type` (1=adaptive, 3=parallel, 4=flexible) defaults to the firmware
+    default when omitted.
+    """
+    ensure_controller()
+
+    try:
+        value = controller.get_gripper_value(gripper_type)
+        is_moving = controller.is_gripper_moving()
+        return GripperStatusResponse(
+            value=value,
+            is_moving=is_moving,
+            timestamp=get_current_timestamp()
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(e)
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=robot_error_detail("Failed to get gripper status", e)
+        )
+
+
 @app.post("/robot/wait", response_model=WaitResponse, tags=["robot"])
 async def wait_for_completion(request: Optional[WaitRequest] = None):
-    """Wait for robot to complete current movement."""
+    """Wait for the robot to reach its target (converged / stalled / timeout).
+
+    Uses tolerance-based convergence, stall detection, and a hard timeout.
+    On stall or timeout the robot is stopped before returning.
+    """
     ensure_controller()
-    
-    timeout = request.timeout if request else 10.0
-    
+
+    timeout = request.timeout if request else 15.0
+    tolerance = request.tolerance if request else 1.0
+    target = request.target if request else None
+
     try:
-        start_time = time.time()
-        completed = controller.wait_for_completion(timeout)
-        elapsed_time = time.time() - start_time
-        
+        result = controller.wait_for_completion(
+            target=target, tol=tolerance, timeout=timeout
+        )
         return WaitResponse(
-            completed=completed,
-            elapsed_time=elapsed_time
+            completed=result["completed"],
+            elapsed_time=result["elapsed"],
+            reason=result["reason"],
+            max_error=result["max_error"],
         )
     except Exception as e:
         raise HTTPException(
