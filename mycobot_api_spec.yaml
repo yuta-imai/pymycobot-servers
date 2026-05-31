@@ -1103,8 +1103,9 @@ components:
           example: true
         reason:
           type: string
-          enum: [ok, out_of_range, ik_failed, joint_limit]
-          example: ok
+          enum: [ok, ok_unverified, out_of_range, joint_limit]
+          example: ok_unverified
+          description: "ok = IK solved within limits; ok_unverified = in-box but firmware IK unavailable (verified at run time via error-32); out_of_range / joint_limit = rejected"
         ik_angles:
           type: array
           items:

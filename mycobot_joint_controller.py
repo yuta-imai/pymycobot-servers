@@ -629,8 +629,9 @@ class MyCobotJointController:
         if solver is None:
             return None
         for _ in range(max(1, retries)):
-            seed = self.get_all_joint_angles() if current_angles is None else list(current_angles)
             try:
+                seed = (self.get_all_joint_angles() if current_angles is None
+                        else list(current_angles))
                 result = solver(list(target_coords), seed)
             except Exception:
                 result = None
@@ -641,13 +642,22 @@ class MyCobotJointController:
 
     def check_pose_reachable(self, coords: List[float]
                              ) -> Tuple[bool, str, Optional[List[float]]]:
-        """Decide, WITHOUT moving, whether a Cartesian pose is reachable.
+        """Best-effort, no-move reachability check for a Cartesian pose.
 
-        Returns (ok, reason, ik_angles):
-          - (True,  "ok",          [angles]) when reachable,
-          - (False, "out_of_range", None)    if outside the workspace box,
-          - (False, "ik_failed",    None)    if firmware IK finds no solution,
-          - (False, "joint_limit",  [angles]) if the IK solution violates a limit.
+        Returns (reachable, reason, ik_angles):
+          - (False, "out_of_range",  None)     outside the workspace box,
+          - (False, "joint_limit",   [angles]) IK solved but a joint exceeds its limit,
+          - (True,  "ok",            [angles]) IK solved and within joint limits,
+          - (True,  "ok_unverified", None)     in-box but firmware IK returned no
+                                               solution, so reachability cannot be
+                                               confirmed before moving.
+
+        Note: this unit's firmware solve_inv_kinematics returns -1 for EVERY
+        pose (IK unsupported), so in practice every in-box pose is reported
+        "ok_unverified" and the authoritative reachability verdict comes at run
+        time from the error-32 (no IK solution) check in
+        wait_for_coords_completion. The IK branch is kept so the check upgrades
+        automatically if a firmware with working IK is ever installed.
         """
         coords = list(coords)
         if len(coords) == 6:
@@ -658,7 +668,7 @@ class MyCobotJointController:
             return False, "out_of_range", None
         ik = self.solve_ik(coords)
         if ik is None:
-            return False, "ik_failed", None
+            return True, "ok_unverified", None
         for i, angle in enumerate(ik, 1):
             lo, hi = self.joint_limits[i]
             if not (lo <= angle <= hi):
