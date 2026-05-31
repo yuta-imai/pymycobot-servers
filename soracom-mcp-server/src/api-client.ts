@@ -1,13 +1,8 @@
 export interface SoracomClientOptions {
   baseUrl: string;
-  apiKey?: string;
-  apiToken?: string;
-  bearerToken?: string;
-  liveViewPathTemplate: string;
-  stillImagePathTemplate: string;
-  liveViewExpiresQueryName: string;
-  stillImageWidthQueryName: string;
-  stillImageHeightQueryName: string;
+  authKeyId: string;
+  authKey: string;
+  tokenTimeoutSeconds?: number;
 }
 
 export class ApiError extends Error {
@@ -21,127 +16,190 @@ export class ApiError extends Error {
   }
 }
 
-interface QueryValue {
-  value: string | number | boolean;
+interface AuthResult {
+  apiKey: string;
+  token: string;
+  operatorId?: string;
+}
+
+interface RequestOptions {
+  body?: unknown;
+  /** Whether to attach the SORACOM API key/token headers. Defaults to true. */
+  auth?: boolean;
 }
 
 export class SoracomClient {
+  private auth?: AuthResult;
+
   constructor(private readonly options: SoracomClientOptions) {}
 
-  async getLiveView(params: {
-    subscriptionId: string;
-    expiresInSeconds?: number;
-  }) {
-    const query: Record<string, QueryValue> = {};
-    if (params.expiresInSeconds !== undefined) {
-      query[this.options.liveViewExpiresQueryName] = { value: params.expiresInSeconds };
-    }
-
+  /**
+   * ライブ動画を再生する URL (MPEG-DASH) を取得します。
+   * URL の有効期間は約 60 秒です。
+   */
+  async getLiveView(params: { deviceId: string }) {
     const response = await this.request(
-      "GET",
-      this.interpolatePath(this.options.liveViewPathTemplate, {
-        subscriptionId: params.subscriptionId,
-      }),
-      query,
+      "POST",
+      `/v1/sora_cam/devices/${encodeURIComponent(params.deviceId)}/atom_cam/live_stream/start`,
     );
-
-    const contentType = response.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      return response.json();
-    }
-
-    return {
-      url: (await response.text()).trim(),
-      contentType,
-    };
+    return response.json();
   }
 
-  async getLiveStillImage(params: {
-    subscriptionId: string;
-    width?: number;
-    height?: number;
-  }) {
-    const query: Record<string, QueryValue> = {};
-    if (params.width !== undefined) {
-      query[this.options.stillImageWidthQueryName] = { value: params.width };
-    }
-    if (params.height !== undefined) {
-      query[this.options.stillImageHeightQueryName] = { value: params.height };
-    }
-
-    const response = await this.request(
+  /**
+   * ライブ静止画 (JPEG) を 2 段階フローで撮影し、Base64 で返します。
+   * 1. 撮影用 URL を取得 (認証あり)。
+   * 2. その URL にアクセスして撮影・ダウンロード (認証なし・約 15 秒)。
+   */
+  async getLiveStillImage(params: { deviceId: string }) {
+    const urlResponse = await this.request(
       "GET",
-      this.interpolatePath(this.options.stillImagePathTemplate, {
-        subscriptionId: params.subscriptionId,
-      }),
-      query,
+      `/v1/sora_cam/devices/${encodeURIComponent(params.deviceId)}/atom_cam/still_picture`,
     );
-
-    const contentType = response.headers.get("content-type") ?? "application/octet-stream";
-    if (contentType.includes("application/json")) {
-      return response.json();
+    const { url } = (await urlResponse.json()) as { url?: string };
+    if (!url) {
+      throw new ApiError("ライブ静止画の撮影用 URL を取得できませんでした。");
     }
 
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    // 撮影用 URL は署名付きでユーザー認証を持たないため、認証ヘッダーは付与しない。
+    const imageResponse = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "*/*" },
+    });
+    if (!imageResponse.ok) {
+      throw await this.toApiError(imageResponse);
+    }
+
+    const contentType =
+      imageResponse.headers.get("content-type") ?? "image/jpeg";
+    const fileName = this.parseContentDispositionFileName(
+      imageResponse.headers.get("content-disposition"),
+    );
+    const bytes = new Uint8Array(await imageResponse.arrayBuffer());
+
     return {
       contentType,
       contentLength: bytes.byteLength,
+      fileName,
       imageBase64: Buffer.from(bytes).toString("base64"),
     };
   }
 
-  private async request(
-    method: "GET",
-    path: string,
-    query: Record<string, QueryValue>,
-  ): Promise<Response> {
-    const url = new URL(path, this.options.baseUrl);
-    Object.entries(query).forEach(([key, q]) => {
-      url.searchParams.set(key, String(q.value));
-    });
-
-    const headers: Record<string, string> = {
-      Accept: "*/*",
-    };
-
-    if (this.options.apiKey && this.options.apiToken) {
-      headers["X-Soracom-API-Key"] = this.options.apiKey;
-      headers["X-Soracom-Token"] = this.options.apiToken;
-    }
-    if (this.options.bearerToken) {
-      headers.Authorization = "Bearer " + this.options.bearerToken;
-    }
-
+  private async authenticate(): Promise<AuthResult> {
+    const url = new URL("/v1/auth", this.options.baseUrl);
     const response = await fetch(url, {
-      method,
-      headers,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        authKeyId: this.options.authKeyId,
+        authKey: this.options.authKey,
+        tokenTimeoutSeconds: this.options.tokenTimeoutSeconds ?? 86400,
+      }),
     });
 
     if (!response.ok) {
-      let detail: unknown;
-      try {
-        detail = await response.json();
-      } catch {
-        detail = await response.text();
+      throw await this.toApiError(response, "SORACOM Auth API");
+    }
+
+    const data = (await response.json()) as {
+      apiKey?: string;
+      token?: string;
+      operatorId?: string;
+    };
+    if (!data.apiKey || !data.token) {
+      throw new ApiError("SORACOM Auth API のレスポンスに apiKey/token が含まれていません。");
+    }
+
+    this.auth = {
+      apiKey: data.apiKey,
+      token: data.token,
+      operatorId: data.operatorId,
+    };
+    return this.auth;
+  }
+
+  private async request(
+    method: "GET" | "POST",
+    path: string,
+    options: RequestOptions = {},
+  ): Promise<Response> {
+    const { body, auth = true } = options;
+    const send = async (): Promise<Response> => {
+      const url = new URL(path, this.options.baseUrl);
+      const headers: Record<string, string> = { Accept: "application/json" };
+
+      if (auth) {
+        const credentials = this.auth ?? (await this.authenticate());
+        headers["X-Soracom-API-Key"] = credentials.apiKey;
+        headers["X-Soracom-Token"] = credentials.token;
       }
-      const detailText = detail ? `: ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
-      throw new ApiError(
-        `SORACOM API ${response.status} ${response.statusText}${detailText}`,
-        response.status,
-        detail,
-      );
+      if (body !== undefined) {
+        headers["Content-Type"] = "application/json";
+      }
+
+      return fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+      });
+    };
+
+    let response = await send();
+
+    // トークン失効に備え、401/403 のときは 1 度だけ再認証してリトライ。
+    if (auth && (response.status === 401 || response.status === 403)) {
+      this.auth = undefined;
+      response = await send();
+    }
+
+    if (!response.ok) {
+      throw await this.toApiError(response);
     }
 
     return response;
   }
 
-  private interpolatePath(template: string, values: Record<string, string>): string {
-    return template.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key: string) => {
-      const value = values[key];
-      if (value === undefined) {
-        throw new ApiError(`Path template variable {${key}} was not provided.`);
+  private async toApiError(
+    response: Response,
+    label = "SORACOM API",
+  ): Promise<ApiError> {
+    let detail: unknown;
+    try {
+      detail = await response.json();
+    } catch {
+      try {
+        detail = await response.text();
+      } catch {
+        detail = undefined;
       }
-      return encodeURIComponent(value);
-    });
+    }
+    const detailText = detail
+      ? `: ${typeof detail === "string" ? detail : JSON.stringify(detail)}`
+      : "";
+    return new ApiError(
+      `${label} ${response.status} ${response.statusText}${detailText}`,
+      response.status,
+      detail,
+    );
+  }
+
+  private parseContentDispositionFileName(
+    header: string | null,
+  ): string | undefined {
+    if (!header) {
+      return undefined;
+    }
+    const utf8Match = header.match(/filename\*=(?:UTF-8'')?([^;]+)/i);
+    if (utf8Match) {
+      try {
+        return decodeURIComponent(utf8Match[1].trim().replace(/^"|"$/g, ""));
+      } catch {
+        return utf8Match[1].trim().replace(/^"|"$/g, "");
+      }
+    }
+    const match = header.match(/filename="?([^";]+)"?/i);
+    return match ? match[1].trim() : undefined;
   }
 }

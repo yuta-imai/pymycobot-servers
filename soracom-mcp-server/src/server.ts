@@ -3,15 +3,11 @@ import { SoracomClient } from "./api-client.js";
 import { registerTools } from "./tools.js";
 
 export interface ServerOptions {
-  apiBaseUrl: string;
-  apiKey?: string;
-  apiToken?: string;
-  bearerToken?: string;
-  liveViewPathTemplate: string;
-  stillImagePathTemplate: string;
-  liveViewExpiresQueryName: string;
-  stillImageWidthQueryName: string;
-  stillImageHeightQueryName: string;
+  baseUrl: string;
+  authKeyId: string;
+  authKey: string;
+  tokenTimeoutSeconds?: number;
+  defaultDeviceId?: string;
 }
 
 export function createServer(options: ServerOptions): McpServer {
@@ -21,17 +17,12 @@ export function createServer(options: ServerOptions): McpServer {
   });
 
   const client = new SoracomClient({
-    baseUrl: options.apiBaseUrl,
-    apiKey: options.apiKey,
-    apiToken: options.apiToken,
-    bearerToken: options.bearerToken,
-    liveViewPathTemplate: options.liveViewPathTemplate,
-    stillImagePathTemplate: options.stillImagePathTemplate,
-    liveViewExpiresQueryName: options.liveViewExpiresQueryName,
-    stillImageWidthQueryName: options.stillImageWidthQueryName,
-    stillImageHeightQueryName: options.stillImageHeightQueryName,
+    baseUrl: options.baseUrl,
+    authKeyId: options.authKeyId,
+    authKey: options.authKey,
+    tokenTimeoutSeconds: options.tokenTimeoutSeconds,
   });
-  registerTools(server, client);
+  registerTools(server, client, options.defaultDeviceId);
 
   return server;
 }

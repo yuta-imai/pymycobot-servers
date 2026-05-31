@@ -3,10 +3,13 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { ApiError, SoracomClient } from "./api-client.js";
 
-const subscriptionId = z
+const deviceIdSchema = z
   .string()
   .min(1)
-  .describe("ライブ視聴対象の subscriptionId (SIM ID など) を指定します。");
+  .describe(
+    "操作対象のソラカメ対応カメラのデバイス ID。省略時は環境変数 SORACOM_DEVICE_ID を使用します。",
+  )
+  .optional();
 
 async function run(fn: () => Promise<unknown>): Promise<CallToolResult> {
   try {
@@ -28,53 +31,48 @@ async function run(fn: () => Promise<unknown>): Promise<CallToolResult> {
   }
 }
 
-export function registerTools(server: McpServer, client: SoracomClient): void {
+export function registerTools(
+  server: McpServer,
+  client: SoracomClient,
+  defaultDeviceId?: string,
+): void {
+  const resolveDeviceId = (deviceId?: string): string => {
+    const resolved = deviceId ?? defaultDeviceId;
+    if (!resolved) {
+      throw new ApiError(
+        "デバイス ID が指定されていません。ツール引数 deviceId を指定するか、環境変数 SORACOM_DEVICE_ID を設定してください。",
+      );
+    }
+    return resolved;
+  };
+
   server.registerTool(
     "get_live_view_unlimited",
     {
-      title: "ライブ視聴見放題 API 呼び出し",
+      title: "ライブ視聴 URL 取得",
       description:
-        "ライブ視聴見放題 API を呼び出してライブ視聴 URL などを取得します。",
+        "ソラカメ対応カメラのライブ動画を再生する URL (MPEG-DASH、約60秒間有効) を取得します。",
       inputSchema: {
-        subscriptionId,
-        expiresInSeconds: z
-          .number()
-          .int()
-          .min(1)
-          .max(86400)
-          .describe("URL の有効期限秒。API が対応する場合のみ使用してください。")
-          .optional(),
+        deviceId: deviceIdSchema,
       },
     },
-    ({ subscriptionId, expiresInSeconds }) =>
-      run(() => client.getLiveView({ subscriptionId, expiresInSeconds })),
+    ({ deviceId }) =>
+      run(() => client.getLiveView({ deviceId: resolveDeviceId(deviceId) })),
   );
 
   server.registerTool(
     "get_live_still_image",
     {
-      title: "ライブ静止画取得 API 呼び出し",
+      title: "ライブ静止画取得",
       description:
-        "ライブ静止画取得 API を呼び出し、画像を Base64 付き JSON で返します。",
+        "ソラカメ対応カメラのライブ静止画 (JPEG) を撮影し、Base64 付き JSON で返します。撮影準備のため約15秒かかります。",
       inputSchema: {
-        subscriptionId,
-        width: z
-          .number()
-          .int()
-          .min(1)
-          .max(7680)
-          .describe("取得したい静止画の横幅ピクセル。")
-          .optional(),
-        height: z
-          .number()
-          .int()
-          .min(1)
-          .max(4320)
-          .describe("取得したい静止画の縦幅ピクセル。")
-          .optional(),
+        deviceId: deviceIdSchema,
       },
     },
-    ({ subscriptionId, width, height }) =>
-      run(() => client.getLiveStillImage({ subscriptionId, width, height })),
+    ({ deviceId }) =>
+      run(() =>
+        client.getLiveStillImage({ deviceId: resolveDeviceId(deviceId) }),
+      ),
   );
 }

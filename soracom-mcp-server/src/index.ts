@@ -1,12 +1,12 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createServer } from "./server.js";
 
-const DEFAULT_API_BASE_URL = "https://api.soracom.io";
-const DEFAULT_LIVE_VIEW_PATH = "/v1/liveStreaming/subscribers/{subscriptionId}/viewUnlimited";
-const DEFAULT_STILL_IMAGE_PATH = "/v1/liveStreaming/subscribers/{subscriptionId}/stillImage";
-const DEFAULT_LIVE_VIEW_EXPIRES_QUERY = "expiresInSeconds";
-const DEFAULT_STILL_IMAGE_WIDTH_QUERY = "width";
-const DEFAULT_STILL_IMAGE_HEIGHT_QUERY = "height";
+const COVERAGE_BASE_URLS: Record<string, string> = {
+  jp: "https://api.soracom.io",
+  g: "https://g.api.soracom.io",
+};
+const DEFAULT_COVERAGE = "jp";
+const DEFAULT_TOKEN_TIMEOUT_SECONDS = 86400;
 
 function findArg(argv: string[], key: string): string | undefined {
   const flagIndex = argv.indexOf(key);
@@ -25,46 +25,59 @@ function findArg(argv: string[], key: string): string | undefined {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
 
-  const apiBaseUrl =
-    findArg(args, "--api-base-url") ??
-    process.env.SORACOM_API_BASE_URL ??
-    DEFAULT_API_BASE_URL;
+  const authKeyId =
+    findArg(args, "--auth-key-id") ?? process.env.SORACOM_AUTH_KEY_ID;
+  const authKey = findArg(args, "--auth-key") ?? process.env.SORACOM_AUTH_KEY;
 
-  const liveViewPathTemplate =
-    findArg(args, "--live-view-path") ??
-    process.env.SORACOM_LIVE_VIEW_PATH ??
-    DEFAULT_LIVE_VIEW_PATH;
+  if (!authKeyId || !authKey) {
+    console.error(
+      "Missing SORACOM credentials. Set SORACOM_AUTH_KEY_ID and SORACOM_AUTH_KEY " +
+        "(or pass --auth-key-id / --auth-key).",
+    );
+    process.exit(1);
+  }
 
-  const stillImagePathTemplate =
-    findArg(args, "--still-image-path") ??
-    process.env.SORACOM_STILL_IMAGE_PATH ??
-    DEFAULT_STILL_IMAGE_PATH;
+  const coverage = (
+    findArg(args, "--coverage") ??
+    process.env.SORACOM_COVERAGE ??
+    DEFAULT_COVERAGE
+  ).toLowerCase();
+  const baseUrl = COVERAGE_BASE_URLS[coverage];
+  if (!baseUrl) {
+    console.error(
+      `Unknown coverage "${coverage}". Use "jp" or "g".`,
+    );
+    process.exit(1);
+  }
+
+  const tokenTimeoutRaw =
+    findArg(args, "--token-timeout") ??
+    process.env.SORACOM_TOKEN_TIMEOUT_SECONDS;
+  const tokenTimeoutSeconds = tokenTimeoutRaw
+    ? Number(tokenTimeoutRaw)
+    : DEFAULT_TOKEN_TIMEOUT_SECONDS;
+  if (!Number.isFinite(tokenTimeoutSeconds) || tokenTimeoutSeconds <= 0) {
+    console.error(`Invalid token timeout: "${tokenTimeoutRaw}".`);
+    process.exit(1);
+  }
+
+  const defaultDeviceId =
+    findArg(args, "--device-id") ?? process.env.SORACOM_DEVICE_ID;
 
   const server = createServer({
-    apiBaseUrl,
-    apiKey: process.env.SORACOM_API_KEY,
-    apiToken: process.env.SORACOM_TOKEN,
-    bearerToken: process.env.SORACOM_BEARER_TOKEN,
-    liveViewPathTemplate,
-    stillImagePathTemplate,
-    liveViewExpiresQueryName:
-      findArg(args, "--live-view-expires-query") ??
-      process.env.SORACOM_LIVE_VIEW_EXPIRES_QUERY ??
-      DEFAULT_LIVE_VIEW_EXPIRES_QUERY,
-    stillImageWidthQueryName:
-      findArg(args, "--still-image-width-query") ??
-      process.env.SORACOM_STILL_IMAGE_WIDTH_QUERY ??
-      DEFAULT_STILL_IMAGE_WIDTH_QUERY,
-    stillImageHeightQueryName:
-      findArg(args, "--still-image-height-query") ??
-      process.env.SORACOM_STILL_IMAGE_HEIGHT_QUERY ??
-      DEFAULT_STILL_IMAGE_HEIGHT_QUERY,
+    baseUrl,
+    authKeyId,
+    authKey,
+    tokenTimeoutSeconds,
+    defaultDeviceId,
   });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error(`soracom-mcp-server ready (SORACOM API: ${apiBaseUrl})`);
+  console.error(
+    `soracom-mcp-server ready (coverage: ${coverage}, SORACOM API: ${baseUrl})`,
+  );
 }
 
 main().catch((err) => {
