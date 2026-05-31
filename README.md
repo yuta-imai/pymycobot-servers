@@ -321,6 +321,7 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── mycobot_api_server.py          # REST API server
 ├── mycobot_server_ctl.py          # Atomic start/stop wrapper for the API server
 ├── mycobot_server_ctl.sh          # Shell entry point (activates venv/pyenv, then runs the wrapper)
+├── soracom-mcp-server/            # MCP server for SORACOM live APIs
 ├── mycobot_api_spec.yaml          # OpenAPI specification
 ├── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript)
 ├── requirements.txt               # Python dependencies
