@@ -1,0 +1,44 @@
+{
+  "name": "@yuta-imai/soracom-mcp-server",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for SORACOM live viewing APIs.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "soracom",
+    "livestream",
+    "claude"
+  ],
+  "license": "Apache-2.0",
+  "author": "Yuta Imai",
+  "type": "module",
+  "bin": {
+    "soracom-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuta-imai/pymycobot-servers.git",
+    "directory": "soracom-mcp-server"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3"
+  }
+}
