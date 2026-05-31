@@ -193,11 +193,10 @@ class MyCobotJointController:
             Current angle in degrees
         """
         self._validate_joint_number(joint_num)
-        angle = self.mc.get_angle(joint_num)
-        # Handle case where robot returns -1 on communication failure
-        if angle == -1 or angle is None:
-            return 0.0  # Return default/safe angle
-        return angle
+        # NOTE: pymycobot's MyCobot has no get_angle() (singular); read the full
+        # pose with get_angles() and index it.
+        angles = self.get_all_joint_angles()
+        return angles[joint_num - 1]
     
     def move_joint_1(self, angle: float, speed: int = 50) -> None:
         """Move Joint 1 (Base) to specified angle."""
@@ -288,9 +287,14 @@ class MyCobotJointController:
             gripper_type: 1=adaptive, 3=parallel, 4=flexible (firmware default 1)
         """
         self._validate_gripper_type(gripper_type, allow_dexterous=False)
+        getter = getattr(self.mc, "get_gripper_value", None)
+        if getter is None:
+            raise NotImplementedError(
+                "get_gripper_value is not available in this pymycobot/firmware version"
+            )
         if gripper_type is None:
-            return self.mc.get_gripper_value()
-        return self.mc.get_gripper_value(gripper_type)
+            return getter()
+        return getter(gripper_type)
 
     def is_gripper_moving(self) -> bool:
         """Return True if the gripper is currently moving.
@@ -298,7 +302,12 @@ class MyCobotJointController:
         Firmware returns 1 (moving), 0 (stationary), or -1 (error); -1/None are
         treated as not moving.
         """
-        result = self.mc.is_gripper_moving()
+        getter = getattr(self.mc, "is_gripper_moving", None)
+        if getter is None:
+            raise NotImplementedError(
+                "is_gripper_moving is not available in this pymycobot/firmware version"
+            )
+        result = getter()
         if result == -1 or result is None:
             return False
         return bool(result)
@@ -360,12 +369,16 @@ class MyCobotJointController:
         if not (0 < increment <= 90):
             raise ValueError(f"Increment must be in (0, 90], got {increment}")
 
-        current = self.get_joint_angle(joint_num)
+        # Read the full pose once: gives the current angle and the basis for
+        # last_target (other joints stay put).
+        angles = list(self.get_all_joint_angles())
+        current = angles[joint_num - 1]
         min_angle, max_angle = self.joint_limits[joint_num]
         # Clamp the target into the joint's safe range (report 4(b)).
         target = max(min_angle, min(max_angle, current + direction * increment))
 
-        self._set_single_joint_target(joint_num, target)
+        angles[joint_num - 1] = target
+        self.last_target = angles
         self.mc.send_angle(joint_num, target, speed)
         return target
     

@@ -29,11 +29,36 @@ type FetchResult<T> = {
  * contract — types come from `mycobot_api_spec.yaml` via openapi-typescript, not
  * from any shared code. Nothing here imports the Python implementation.
  */
+/** Default per-request timeout (ms). Bounds how long any tool can hang if the
+ *  robot/serial stops responding, instead of waiting minutes for a TCP/MCP
+ *  timeout. Override with the `timeoutMs` constructor arg. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+
 export class MyCobotClient {
   private readonly client: Client<paths>;
 
-  constructor(private readonly baseUrl: string) {
-    this.client = createClient<paths>({ baseUrl });
+  constructor(
+    private readonly baseUrl: string,
+    private readonly timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ) {
+    this.client = createClient<paths>({
+      baseUrl,
+      fetch: (request: Request) => this.fetchWithTimeout(request),
+    });
+  }
+
+  /** Wrap fetch with an abort-based timeout so no request hangs indefinitely. */
+  private async fetchWithTimeout(request: Request): Promise<Response> {
+    try {
+      return await fetch(request, { signal: AbortSignal.timeout(this.timeoutMs) });
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new ApiError(
+          `Request timed out after ${this.timeoutMs}ms — the robot may be busy or unresponsive (try get_robot_status, then stop_robot).`,
+        );
+      }
+      throw err;
+    }
   }
 
   private unwrap<T>(result: FetchResult<T>): T {

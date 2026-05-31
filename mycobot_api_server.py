@@ -636,6 +636,11 @@ async def get_gripper_status(gripper_type: Optional[int] = None):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
+    except NotImplementedError as e:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=str(e)
+        )
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

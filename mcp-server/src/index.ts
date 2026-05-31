@@ -16,9 +16,17 @@ function resolveApiBaseUrl(argv: string[]): string {
   return process.env.MYCOBOT_API_BASE_URL ?? DEFAULT_API_BASE_URL;
 }
 
+/** Optional per-request timeout (ms) from `MYCOBOT_API_TIMEOUT_MS`. */
+function resolveTimeoutMs(): number | undefined {
+  const raw = process.env.MYCOBOT_API_TIMEOUT_MS;
+  if (!raw) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 async function main(): Promise<void> {
   const apiBaseUrl = resolveApiBaseUrl(process.argv.slice(2));
-  const server = createServer({ apiBaseUrl });
+  const server = createServer({ apiBaseUrl, timeoutMs: resolveTimeoutMs() });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
