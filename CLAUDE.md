@@ -89,7 +89,7 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 ### MCP Server (`mcp-server/`)
 - **Separate Node/TypeScript runtime**: Published to npm, run via `npx`; intended mainly for Claude Desktop (stdio transport)
 - **No code coupling**: Controls the robot only through the REST API over HTTP; the sole contract is `mycobot_api_spec.yaml`, consumed at build time via `openapi-typescript`
-- **Curated tools**: `get_robot_status`, `get_joint_angles`, `move_joint`, `move_all_joints`, `jog_joint`, `control_gripper`, `go_home`, `stop_robot`, `wait_for_movement`
+- **Curated tools**: `get_robot_status`, `get_joint_angles`, `move_joint`, `move_all_joints`, `jog_joint`, `control_gripper`, `get_gripper_status`, `go_home`, `stop_robot`, `wait_for_movement`
 - **Input validation**: zod schemas enforce joint/speed/gripper limits before any request is sent
 - **Layout**: `src/api-client.ts` (typed HTTP wrapper), `src/tools.ts` (tool definitions), `src/server.ts` + `src/index.ts` (server + stdio entry), `src/generated/api-types.ts` (generated, committed)
 

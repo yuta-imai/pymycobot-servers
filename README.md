@@ -198,28 +198,29 @@ instructions.
 | PUT | `/joints/{joint_num}/angle` | Move specific joint |
 | GET | `/joints/angles` | Get all joint angles |
 | PUT | `/joints/angles` | Move all joints |
-| POST | `/joints/{joint_num}/jog` | Jog joint in direction |
+| POST | `/joints/{joint_num}/jog` | Jog joint by a fixed increment (non-blocking) |
 | POST | `/gripper/open` | Open gripper |
 | POST | `/gripper/close` | Close gripper |
 | POST | `/gripper/release` | Release gripper |
 | PUT | `/gripper/state` | Set gripper state (0/1/10) |
 | PUT | `/gripper/value` | Set gripper opening value (0-100) |
 | POST | `/gripper/calibrate` | Calibrate gripper |
+| GET | `/gripper/status` | Get gripper value + moving state |
 | POST | `/robot/home` | Move to home position |
 | POST | `/robot/stop` | Emergency stop |
-| GET | `/robot/status` | Get robot status |
-| POST | `/robot/wait` | Wait for movement completion |
+| GET | `/robot/status` | Get robot status (`?include_error=true` for fault code) |
+| POST | `/robot/wait` | Wait for target (converged / stalled / timeout, auto-stop) |
 
 ### Joint Limits
 
 | Joint | Range | Description |
 |-------|-------|-------------|
-| 1 | -165° to +165° | Base rotation |
-| 2 | -165° to +165° | Shoulder |
-| 3 | -165° to +165° | Elbow |
-| 4 | -165° to +165° | Wrist 1 |
-| 5 | -165° to +165° | Wrist 2 |
-| 6 | -175° to +175° | Wrist 3 |
+| 1 | -168° to +168° | Base rotation |
+| 2 | -135° to +135° | Shoulder |
+| 3 | -150° to +150° | Elbow |
+| 4 | -145° to +145° | Wrist 1 |
+| 5 | -155° to +160° | Wrist 2 |
+| 6 | -180° to +180° | Wrist 3 |
 
 ### Speed Settings
 

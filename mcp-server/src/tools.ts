@@ -23,10 +23,10 @@ const gripperType = z
 
 const angle = z
   .number()
-  .min(-175)
-  .max(175)
+  .min(-180)
+  .max(180)
   .describe(
-    "Target angle in degrees. Per-joint safe limits: joints 1-5 ±165°, joint 6 ±175°. Out-of-range values are rejected by the robot.",
+    "Target angle in degrees. Per-joint safe limits (MyCobot 280): J1 ±168°, J2 ±135°, J3 ±150°, J4 ±145°, J5 -155° to +160°, J6 ±180°. Out-of-range values are rejected.",
   );
 
 /** Wrap a tool body so REST/network failures become a clean MCP error result. */
@@ -56,12 +56,12 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
     {
       title: "Get robot status",
       description:
-        "Get comprehensive robot status: all joint angles, whether the robot is currently moving, and a server health check. Call this before issuing movement commands.",
+        "Get comprehensive robot status: all joint angles, whether the robot is currently moving, the firmware error code/message (if any), and a server health check. Call this before issuing movement commands.",
       inputSchema: {},
     },
     () =>
       run(async () => ({
-        status: await client.getStatus(),
+        status: await client.getStatus(true),
         health: await client.getHealth(),
       })),
   );
@@ -119,7 +119,7 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
     {
       title: "Jog a joint",
       description:
-        "Incrementally jog a single joint in the positive or negative direction. Useful for small manual adjustments.",
+        "Jog a single joint by a fixed increment in the positive or negative direction. Each call moves the joint by `increment` degrees (clamped to the joint's safe range) and returns immediately. Useful for small manual adjustments.",
       inputSchema: {
         joint: z
           .number()
@@ -131,10 +131,16 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
           .union([z.literal(1), z.literal(-1)])
           .describe("1 for the positive direction, -1 for the negative."),
         speed,
+        increment: z
+          .number()
+          .gt(0)
+          .max(90)
+          .describe("Degrees to move per call (0-90). Defaults to 5°.")
+          .optional(),
       },
     },
-    ({ joint, direction, speed }) =>
-      run(() => client.jogJoint(joint, direction, speed)),
+    ({ joint, direction, speed, increment }) =>
+      run(() => client.jogJoint(joint, direction, speed, increment)),
   );
 
   server.registerTool(
@@ -179,6 +185,19 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
   );
 
   server.registerTool(
+    "get_gripper_status",
+    {
+      title: "Get gripper status",
+      description:
+        "Get the current gripper opening value (0=closed to 100=open) and whether it is moving.",
+      inputSchema: {
+        gripper_type: gripperType,
+      },
+    },
+    ({ gripper_type }) => run(() => client.getGripperStatus(gripper_type)),
+  );
+
+  server.registerTool(
     "go_home",
     {
       title: "Move to home position",
@@ -203,16 +222,23 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
     {
       title: "Wait for movement to complete",
       description:
-        "Block until the current movement finishes or the timeout elapses. Returns whether it completed and the elapsed time.",
+        "Block until the robot reaches the last commanded target, stalls, or times out. Returns `completed`, `elapsed_time`, `reason` ('converged' = success, 'stalled', 'timeout', or 'idle'), and `max_error` (largest per-joint error in degrees). On stall or timeout the robot is stopped automatically.",
       inputSchema: {
         timeout: z
           .number()
           .min(0.1)
           .max(60)
-          .describe("Maximum seconds to wait (0.1-60). Defaults to 10.")
+          .describe("Maximum seconds to wait (0.1-60). Defaults to 15.")
+          .optional(),
+        tolerance: z
+          .number()
+          .min(0)
+          .max(10)
+          .describe("Per-joint convergence tolerance in degrees. Defaults to 1.0.")
           .optional(),
       },
     },
-    ({ timeout }) => run(() => client.waitForMovement(timeout)),
+    ({ timeout, tolerance }) =>
+      run(() => client.waitForMovement(timeout, tolerance)),
   );
 }

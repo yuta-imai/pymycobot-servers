@@ -48,15 +48,16 @@ The REST API base URL is resolved in this order (default `http://localhost:8080`
 
 | Tool | Description |
 |------|-------------|
-| `get_robot_status` | All joint angles, movement state, and a health check |
+| `get_robot_status` | All joint angles, movement state, firmware error code, and a health check |
 | `get_joint_angles` | Current angle of all six joints |
 | `move_joint` | Move one joint to an absolute angle |
 | `move_all_joints` | Move all six joints simultaneously |
-| `jog_joint` | Incrementally jog a joint in a direction |
+| `jog_joint` | Jog a joint by a fixed increment (non-blocking) |
 | `control_gripper` | `open` / `close` / `release` / `set_value` / `calibrate` |
+| `get_gripper_status` | Current gripper opening value and moving state |
 | `go_home` | Move all joints to 0° |
 | `stop_robot` | Emergency stop |
-| `wait_for_movement` | Block until movement completes or times out |
+| `wait_for_movement` | Wait for the target (converged / stalled / timeout, auto-stop) |
 
 Inputs are validated with [zod](https://zod.dev) (joint numbers 1–6, speed 1–100,
 gripper value 0–100, etc.) before any request is sent.

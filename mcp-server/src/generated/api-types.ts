@@ -212,6 +212,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/gripper/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get gripper status
+         * @description Get current gripper opening value (0-100) and whether it is moving
+         */
+        get: operations["get_gripper_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/robot/home": {
         parameters: {
             query?: never;
@@ -355,6 +375,30 @@ export interface components {
              * @example 2023-12-01T12:00:00Z
              */
             timestamp: string;
+            /**
+             * @description Firmware error code (only set when include_error=true and an error is present)
+             * @example null
+             */
+            error_code?: number | null;
+            /**
+             * @description Human-readable error description for error_code
+             * @example null
+             */
+            error_message?: string | null;
+        };
+        GripperStatusResponse: {
+            /**
+             * @description Current gripper opening value (0-100)
+             * @example 100
+             */
+            value: number;
+            /** @example false */
+            is_moving: boolean;
+            /**
+             * Format: date-time
+             * @example 2023-12-01T12:00:00Z
+             */
+            timestamp: string;
         };
         MoveJointRequest: {
             /**
@@ -398,6 +442,13 @@ export interface components {
              * @example 50
              */
             speed?: number;
+            /**
+             * Format: float
+             * @description Degrees to move per call (0 < increment <= 90)
+             * @default 5
+             * @example 5
+             */
+            increment?: number;
         };
         SpeedRequest: {
             /**
@@ -410,10 +461,19 @@ export interface components {
             /**
              * Format: float
              * @description Maximum time to wait in seconds
-             * @default 10
-             * @example 10
+             * @default 15
+             * @example 15
              */
             timeout?: number;
+            /**
+             * Format: float
+             * @description Per-joint convergence tolerance in degrees
+             * @default 1
+             * @example 1
+             */
+            tolerance?: number;
+            /** @description Optional explicit 6-joint target. Defaults to the last commanded target. */
+            target?: number[] | null;
         };
         GripperActionRequest: {
             /**
@@ -467,7 +527,7 @@ export interface components {
         };
         WaitResponse: {
             /**
-             * @description True if movement completed, False if timeout
+             * @description True if the target was reached (converged), False otherwise
              * @example true
              */
             completed: boolean;
@@ -477,6 +537,18 @@ export interface components {
              * @example 2.5
              */
             elapsed_time: number;
+            /**
+             * @description Terminal condition: converged (success), stalled, timeout, or idle (legacy fallback)
+             * @example converged
+             * @enum {string}
+             */
+            reason: "converged" | "stalled" | "timeout" | "idle";
+            /**
+             * Format: float
+             * @description Maximum per-joint error to target in degrees at return time (null if unknown)
+             * @example 0.3
+             */
+            max_error?: number | null;
         };
         SuccessResponse: {
             /** @example true */
@@ -979,6 +1051,47 @@ export interface operations {
             };
         };
     };
+    get_gripper_status: {
+        parameters: {
+            query?: {
+                /** @description Gripper type (1=adaptive, 3=parallel, 4=flexible); firmware default when omitted */
+                gripper_type?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current gripper status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GripperStatusResponse"];
+                };
+            };
+            /** @description Invalid gripper type */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     home_position: {
         parameters: {
             query?: never;
@@ -1043,7 +1156,10 @@ export interface operations {
     };
     get_robot_status: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Also report the firmware error code/message (extra serial round-trip) */
+                include_error?: boolean;
+            };
             header?: never;
             path?: never;
             cookie?: never;

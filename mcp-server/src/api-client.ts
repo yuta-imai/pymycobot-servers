@@ -58,8 +58,24 @@ export class MyCobotClient {
     return this.unwrap(await this.client.GET("/health"));
   }
 
-  async getStatus() {
-    return this.unwrap(await this.client.GET("/robot/status"));
+  async getStatus(includeError?: boolean) {
+    return this.unwrap(
+      await this.client.GET("/robot/status", {
+        params: {
+          query: includeError !== undefined ? { include_error: includeError } : {},
+        },
+      }),
+    );
+  }
+
+  async getGripperStatus(gripperType?: number) {
+    return this.unwrap(
+      await this.client.GET("/gripper/status", {
+        params: {
+          query: gripperType !== undefined ? { gripper_type: gripperType } : {},
+        },
+      }),
+    );
   }
 
   async getAllJointAngles() {
@@ -83,11 +99,20 @@ export class MyCobotClient {
     );
   }
 
-  async jogJoint(joint: number, direction: 1 | -1, speed?: number) {
+  async jogJoint(
+    joint: number,
+    direction: 1 | -1,
+    speed?: number,
+    increment?: number,
+  ) {
     return this.unwrap(
       await this.client.POST("/joints/{joint_num}/jog", {
         params: { path: { joint_num: joint } },
-        body: { direction, ...(speed !== undefined ? { speed } : {}) },
+        body: {
+          direction,
+          ...(speed !== undefined ? { speed } : {}),
+          ...(increment !== undefined ? { increment } : {}),
+        },
       }),
     );
   }
@@ -144,10 +169,13 @@ export class MyCobotClient {
     return this.unwrap(await this.client.POST("/robot/stop"));
   }
 
-  async waitForMovement(timeout?: number) {
+  async waitForMovement(timeout?: number, tolerance?: number) {
     return this.unwrap(
       await this.client.POST("/robot/wait", {
-        body: timeout !== undefined ? { timeout } : {},
+        body: {
+          ...(timeout !== undefined ? { timeout } : {}),
+          ...(tolerance !== undefined ? { tolerance } : {}),
+        },
       }),
     );
   }
