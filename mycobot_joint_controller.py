@@ -683,25 +683,32 @@ class MyCobotJointController:
             full[slot] = math.radians(a)
         return full
 
+    # The physical gripper approach axis (direction the fingers point / the arm
+    # descends to grasp) is ikpy tool-X, NOT tool-Z. Verified on hardware: at
+    # joints [0,0,-90,0,90,0] the gripper points straight down (world -Z) and
+    # ikpy tool-X = [0,0,-1] there, while tool-Z = [0,1,0] (horizontal). The
+    # earlier tool-Z assumption was wrong and produced horizontal "top-down"
+    # grasps.
+    _APPROACH_AXIS_COL = 0  # tool-X column of the FK rotation matrix
+
     def solve_topdown_ik(self, x: float, y: float, z: float,
-                         yaw_deg: float = 0.0,
+                         yaw_deg: Optional[float] = None,
                          current_angles: Optional[List[float]] = None,
                          pos_tol_mm: float = 2.0) -> Optional[List[float]]:
-        """IK for a straight-DOWN grasp at (x,y,z) with gripper yaw, or None.
+        """IK for a straight-DOWN grasp at (x,y,z), or None if unreachable.
 
-        Why this is separate from solve_ik: a full straight-down orientation is
-        at the XYZ-Euler gimbal boundary, so an rpy/full-matrix target is
-        ill-conditioned. Instead we constrain ONLY the approach axis (tool-Z) to
-        point straight down via ikpy orientation_mode="Z" (verified: downness
-        +1.000, J5≈0, stable), let the arm pick a natural wrist, then set the
-        gripper yaw explicitly by overriding J6.
+        Constrains the gripper APPROACH axis (tool-X — see _APPROACH_AXIS_COL)
+        to point straight down via ikpy orientation_mode="X" (target [0,0,-1]),
+        letting the arm choose a natural wrist. Verified by an FK round-trip
+        (position + that tool-X actually points down).
 
-        yaw_deg: desired gripper opening direction in the base XY plane (the
-        angle of tool-X, atan2(y,x)), matching vision.locate's yaw_deg. null/None
-        yaw leaves the arm's natural wrist (J6 from the Z-constrained solve).
+        yaw_deg: gripper opening direction about the (vertical) approach axis.
+        NOT YET CALIBRATED — which joint rolls the gripper about the approach
+        axis at the straight-down pose still needs a hardware sweep, so for now a
+        non-None yaw_deg is accepted but ignored (natural wrist is used). Tracked
+        as a follow-up; flat objects grasp fine without yaw control.
 
-        Returns 6 joint angles (deg) verified by an FK round-trip (position +
-        downness), or None if unreachable / not straight-down / J6 out of range.
+        Returns 6 joint angles (deg), or None if unreachable / not down.
         """
         if self.ik_chain is None:
             return None
@@ -711,7 +718,7 @@ class MyCobotJointController:
             try:
                 seed_deg = self.get_all_joint_angles()
             except RuntimeError:
-                seed_deg = [0.0, -40.0, -40.0, 0.0, 0.0, 0.0]
+                seed_deg = [0.0, 0.0, -90.0, 0.0, 90.0, 0.0]
         else:
             seed_deg = list(current_angles)
 
@@ -719,7 +726,7 @@ class MyCobotJointController:
             sol_full = self.ik_chain.inverse_kinematics(
                 target_position=np.array([x, y, z], dtype=float) / 1000.0,
                 target_orientation=np.array([0.0, 0.0, -1.0]),
-                orientation_mode="Z",
+                orientation_mode="X",
                 initial_position=self._ikpy_full_vector(seed_deg),
             )
         except Exception:
@@ -727,34 +734,15 @@ class MyCobotJointController:
         angles = [self._wrap_angle(math.degrees(sol_full[i]))
                   for i in self.ik_active_idx]
 
-        # Verify the Z-constrained solve: position close AND tool pointing down.
+        # Verify: position close AND the APPROACH axis (tool-X) points down.
         fk_frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles))
         fk_pos_mm = [float(v) * 1000.0 for v in fk_frame[:3, 3]]
         pos_err = math.sqrt(sum((f - t) ** 2
                                 for f, t in zip(fk_pos_mm, (x, y, z))))
-        tz = fk_frame[:3, 2]
-        downness = -float(tz[2]) / (float(np.linalg.norm(tz)) or 1e-9)
+        approach = fk_frame[:3, self._APPROACH_AXIS_COL]
+        downness = -float(approach[2]) / (float(np.linalg.norm(approach)) or 1e-9)
         if pos_err > pos_tol_mm or downness < 0.98:
             return None
-
-        # Apply the requested gripper yaw by setting J6 directly. With tool-Z
-        # vertical, increasing J6 ROTATES the tool-X azimuth by the SAME
-        # magnitude in the OPPOSITE sense (measured on hardware: dJ6 +30 ->
-        # tool-X yaw -30, slope -1). achieved = natural_yaw - (J6 - base_J6), so
-        # to hit yaw_deg: J6 = base_J6 + (natural_yaw - yaw_deg).
-        if yaw_deg is not None:
-            R = fk_frame[:3, :3]
-            natural_yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
-            j6 = self._wrap_angle(angles[5] + (natural_yaw - yaw_deg))
-            lo, hi = self.joint_limits[6]
-            if not (lo <= j6 <= hi):
-                # Gripper is symmetric (parallel jaws): a 180° flip is equivalent.
-                j6_alt = self._wrap_angle(j6 + 180.0)
-                if lo <= j6_alt <= hi:
-                    j6 = j6_alt
-                else:
-                    return None
-            angles[5] = j6
         return angles
 
     def ikpy_fk(self, angles_deg: List[float]) -> List[float]:

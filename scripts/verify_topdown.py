@@ -31,9 +31,10 @@ TEST_YAWS = [0.0, 45.0, 90.0, -45.0]
 
 
 def downness(R):
-    tz = [R[i, 2] for i in range(3)]
-    n = math.sqrt(sum(c * c for c in tz)) or 1e-9
-    return -tz[2] / n
+    # Gripper approach axis = tool-X (column 0), verified on hardware.
+    ax = [R[i, 0] for i in range(3)]
+    n = math.sqrt(sum(c * c for c in ax)) or 1e-9
+    return -ax[2] / n
 
 
 def yaw_match(achieved, requested):
@@ -58,28 +59,26 @@ def make_ctrl_offline():
 
 
 def offline_checks(ctrl):
-    print("== solve_topdown_ik: down + yaw across the table region ==")
-    print("   want: downness>=0.98, J5 near 0, yaw_err small (180-flip allowed)")
+    print("== solve_topdown_ik: gripper approach axis (tool-X) straight down ==")
+    print("   want: downness(tool-X) >= 0.98 across the reachable table region")
+    print("   (yaw control not yet calibrated; yaw arg ignored for now)")
     ok = True
+    seed = [0, 0, -90, 0, 90, 0]  # the verified straight-down pose, as IK seed
     for (x, y, z) in TEST_POINTS:
-        for yaw in TEST_YAWS:
-            ang = ctrl.solve_topdown_ik(x, y, z, yaw_deg=yaw,
-                                        current_angles=[0, -40, -40, 0, 0, 0])
-            if ang is None:
-                print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+6.1f} -> None")
-                ok = False
-                continue
-            frame = ctrl.ik_chain.forward_kinematics(ctrl._ikpy_full_vector(ang))
-            R = frame[:3, :3]
-            d = downness(R)
-            ach_yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
-            yerr = yaw_match(ach_yaw, yaw)
-            bad = d < 0.98 or yerr > 5.0 or abs(ang[4]) > 30
-            ok = ok and not bad
-            flag = "" if not bad else "  <-- PROBLEM"
-            print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+6.1f}  J5 {ang[4]:+6.1f} "
-                  f"J6 {ang[5]:+7.1f}  downness {d:+.3f}  yaw_err {yerr:4.1f}{flag}")
-    print(f"\n  overall: {'OK — straight down with correct yaw' if ok else 'PROBLEM'}")
+        ang = ctrl.solve_topdown_ik(x, y, z, current_angles=seed)
+        if ang is None:
+            print(f"  pt({x:.0f},{y:.0f},{z:.0f}) -> None (unreachable?)")
+            ok = False
+            continue
+        frame = ctrl.ik_chain.forward_kinematics(ctrl._ikpy_full_vector(ang))
+        d = downness(frame[:3, :3])
+        fkpos = [round(frame[i, 3] * 1000, 1) for i in range(3)]
+        bad = d < 0.98
+        ok = ok and not bad
+        flag = "" if not bad else "  <-- PROBLEM"
+        print(f"  pt({x:.0f},{y:.0f},{z:.0f})  J=[{','.join(f'{a:.0f}' for a in ang)}]"
+              f"  downness {d:+.3f}  fkpos {fkpos}{flag}")
+    print(f"\n  overall: {'OK — gripper points straight down' if ok else 'PROBLEM'}")
     return ok
 
 
@@ -119,9 +118,9 @@ def main():
             pass
 
     print("\n== LIVE: drive to a few top-down poses (ROBOT MOVES) ==")
-    for (x, y, z, yaw) in [(180.0, 0.0, 180.0, 0.0), (180.0, 0.0, 180.0, 45.0)]:
-        ang = ctrl.solve_topdown_ik(x, y, z, yaw_deg=yaw)
-        print(f"\n  topdown({x:.0f},{y:.0f},{z:.0f}, yaw={yaw:+.0f}) -> "
+    for (x, y, z) in [(180.0, 0.0, 180.0), (180.0, 60.0, 160.0)]:
+        ang = ctrl.solve_topdown_ik(x, y, z, current_angles=[0, 0, -90, 0, 90, 0])
+        print(f"\n  topdown({x:.0f},{y:.0f},{z:.0f}) -> "
               f"{'IK ok' if ang else 'no solution'}")
         if ang is None:
             continue

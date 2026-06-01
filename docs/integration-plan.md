@@ -76,15 +76,18 @@
 - **ヨー反転（アームを真上から180°回す）は無効**: `get_coords` は基準座標系で返るため運動学不変、
   ヨー回転は重力トルクも変えない（実機で同一 coords を確認）。これは依然有効な結論。
 - **設計への反映**:
-  - 完全な鉛直真下把持は**可能**。実装は `solve_topdown_ik(x, y, z, yaw)`（controller）。
-  - **真下は「tool-Z 軸だけ拘束」で出す**: ikpy `orientation_mode="Z"`（target = [0,0,-1]）。
-    full rotation matrix を与えると ry≈±90 のジンバル退化で破綻する（手書き行列で ori_err 90°
-    を確認済み）ため、approach 軸のみ拘束し、手首の残り自由度はアームに委ねる。
-  - **yaw は J6 へ重畳**: tool-Z 鉛直のとき dJ6 と tool-X の azimuth は **傾き -1**（実測:
-    dJ6 +30 → yaw -30）。よって `J6 = base_J6 + (natural_yaw - yaw_deg)`。平行グリッパーは
-    対称なので J6 がリミット外なら 180° flip で代替。
-  - **検証結果（`scripts/verify_topdown.py --no-connect`）**: テーブル全域×yaw{0,45,90,-45}の
-    全16ケースで **downness +1.000 / J5≈0 / yaw_err 0.0**。実機 `--move` 着地確認は次段。
+  - 完全な鉛直真下把持は**可能**。実装は `solve_topdown_ik(x, y, z)`（controller）。
+  - **グリッパー接近軸 = ikpy tool-X（フランジ Z 軸ではない！）**。当初 tool-Z と仮定して
+    `orientation_mode="Z"` で拘束したが、実機ではグリッパーが水平を向いた。実機ペン目視で
+    切り分け、姿勢 `[0,0,-90,0,90,0]` でグリッパーが世界系の真下を指すと確認 → その姿勢の
+    ikpy FK で **tool-X = [0,0,-1]（真下）/ tool-Z = [0,1,0]（水平）**。接近軸は tool-X と確定。
+  - **真下は「tool-X 軸を拘束」で出す**: ikpy `orientation_mode="X"`（target = [0,0,-1]）。
+    手首の残り自由度はアームに委ね、FK 往復で position と「tool-X が真下」を検証。
+  - **yaw（接近軸まわりの回転）は未較正**: 真下姿勢でどの関節がグリッパーを接近軸まわりに
+    ロールさせるか要・実機スイープ。当面 `solve_topdown_ik` は yaw 引数を受けるが無視（自然な
+    手首を使用）。平たい物の把持は yaw 無しで可。yaw 較正は follow-up。
+  - **教訓**: ikpy の tool 座標軸とグリッパー物理軸の対応は仮定せず、実機（ペン＋目視）で
+    必ず確認すること。位置・rpy が完全一致していても、どの軸が接近軸かは別問題。
 
 ---
 
