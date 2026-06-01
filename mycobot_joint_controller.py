@@ -6,6 +6,8 @@ MyCobot robot using the pymycobot library.
 """
 
 from pymycobot import MyCobot
+import os
+import math
 import time
 from collections import deque
 from typing import Union, List, Optional, Tuple
@@ -27,6 +29,25 @@ class MyCobotJointController:
         33: "Linear motion has no adjacent solution",
         34: "Linear motion has no adjacent solution",
     }
+
+    # The 6 actuated revolute joints (J1..J6) in the MyCobot 280 m5 URDF, in
+    # order. We compute IK ourselves with ikpy because this unit's firmware IK
+    # (solve_inv_kinematics) is broken (returns -1 for every pose); firmware FK
+    # is broken too (angles_to_coords ignores its argument). ikpy FK was verified
+    # against the live robot to 2.5-10 mm (scripts/verify_fk.py), so self-IK with
+    # an FK round-trip check is the trustworthy path.
+    _IK_ACTIVE_JOINT_NAMES = (
+        "joint2_to_joint1",
+        "joint3_to_joint2",
+        "joint4_to_joint3",
+        "joint5_to_joint4",
+        "joint6_to_joint5",
+        "joint6output_to_joint6",
+    )
+    _URDF_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "urdf", "mycobot_280_m5.urdf",
+    )
 
 
     def __init__(self, port: str = "/dev/ttyACM0", baudrate: int = 115200):
@@ -73,6 +94,18 @@ class MyCobotJointController:
 
         # Last sampled (timestamp, angles) for stateful is_moving computation.
         self._last_angle_sample: Optional[Tuple[float, List[float]]] = None
+
+        # ikpy kinematic chain for self-computed IK/FK (firmware IK is broken).
+        # Built lazily and guarded: if ikpy or the URDF is missing, IK methods
+        # report unavailability but joint/gripper control still works, so the
+        # server never fails to start over a missing kinematics dependency.
+        self.ik_chain = None
+        self.ik_active_idx: Optional[List[int]] = None
+        self.ik_error: Optional[str] = None
+        try:
+            self._init_ik_chain()
+        except Exception as exc:  # noqa: BLE001 - record and continue
+            self.ik_error = str(exc)
     
     def _validate_joint_number(self, joint_num: int) -> None:
         """Validate joint number is within valid range."""
@@ -587,17 +620,98 @@ class MyCobotJointController:
                     f"Coord {label}={value} out of workspace range [{lo}, {hi}]"
                 )
 
+    # ---- ikpy kinematic model (self-computed IK/FK) ----
+
+    def _init_ik_chain(self) -> None:
+        """Build the ikpy chain from the URDF, with a name-matched active mask.
+
+        Raises if ikpy/URDF are unavailable or the 6 actuated joints cannot be
+        identified; __init__ catches that and records self.ik_error.
+        """
+        from ikpy.chain import Chain
+
+        if not os.path.exists(self._URDF_PATH):
+            raise FileNotFoundError(f"URDF not found at {self._URDF_PATH}")
+        chain = Chain.from_urdf_file(self._URDF_PATH, base_elements=["g_base"])
+        names = [link.name for link in chain.links]
+        mask = [name in self._IK_ACTIVE_JOINT_NAMES for name in names]
+        if sum(mask) != 6:
+            raise RuntimeError(
+                f"Expected 6 active joints in URDF chain, got {sum(mask)} "
+                f"(links: {names})"
+            )
+        chain.active_links_mask = mask
+        self.ik_chain = chain
+        self.ik_active_idx = [i for i, m in enumerate(mask) if m]
+
+    @staticmethod
+    def _euler_xyz_to_matrix(rx: float, ry: float, rz: float):
+        """Build a rotation matrix from XYZ Euler angles in degrees (R = Rz·Ry·Rx).
+
+        Matches the convention recovered by _matrix_to_euler_xyz, which was
+        verified against the robot's get_coords orientation to within a degree.
+        """
+        import numpy as np
+        ax, ay, az = math.radians(rx), math.radians(ry), math.radians(rz)
+        cx, sx = math.cos(ax), math.sin(ax)
+        cy, sy = math.cos(ay), math.sin(ay)
+        cz, sz = math.cos(az), math.sin(az)
+        Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+        Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+        Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+        return Rz @ Ry @ Rx
+
+    @staticmethod
+    def _matrix_to_euler_xyz(R) -> List[float]:
+        """Recover XYZ Euler angles (degrees) from a rotation matrix."""
+        sy = math.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+        if sy > 1e-6:
+            rx = math.atan2(R[2, 1], R[2, 2])
+            ry = math.atan2(-R[2, 0], sy)
+            rz = math.atan2(R[1, 0], R[0, 0])
+        else:  # gimbal lock (ry ≈ ±90)
+            rx = math.atan2(-R[1, 2], R[1, 1])
+            ry = math.atan2(-R[2, 0], sy)
+            rz = 0.0
+        return [math.degrees(rx), math.degrees(ry), math.degrees(rz)]
+
+    def _ikpy_full_vector(self, angles_deg: List[float]):
+        """Map 6 joint angles (deg) onto the full ikpy link vector (radians)."""
+        import numpy as np
+        full = np.zeros(len(self.ik_chain.links))
+        for slot, a in zip(self.ik_active_idx, angles_deg):
+            full[slot] = math.radians(a)
+        return full
+
+    def ikpy_fk(self, angles_deg: List[float]) -> List[float]:
+        """Forward kinematics via ikpy: 6 joint angles (deg) -> pose mm/deg.
+
+        Returns [x, y, z, rx, ry, rz]. Raises RuntimeError if the chain is
+        unavailable.
+        """
+        if self.ik_chain is None:
+            raise RuntimeError(f"IK chain unavailable: {self.ik_error}")
+        frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles_deg))
+        pos_mm = [float(v) * 1000.0 for v in frame[:3, 3]]
+        ori_deg = self._matrix_to_euler_xyz(frame[:3, :3])
+        return pos_mm + ori_deg
+
     def send_coords(self, coords: List[float], speed: int = 30, mode: int = 0) -> None:
         """Move the end-effector to an absolute Cartesian pose (non-blocking).
+
+        Self-IK path: the pose is converted to joint angles with ikpy and sent
+        via send_angles (joint move), because this unit's firmware Cartesian
+        move (firmware send_coords) drives off broken firmware IK and runs away.
 
         Args:
             coords: [x, y, z, rx, ry, rz] in mm / degrees.
             speed: 1-100.
-            mode: 0 = angular (point-to-point, default), 1 = linear (straight line).
+            mode: accepted for API compatibility but IGNORED — motion is always
+                joint-interpolated (no firmware straight-line move available).
 
-        send_coords does NOT verify reachability; an in-range but unreachable
-        pose silently does not move (firmware error 32). Use check_pose_reachable()
-        before and wait_for_coords_completion() after.
+        Raises ValueError if the pose is out of the workspace box, has no
+        reliable IK solution, or the IK solution violates a joint limit; the arm
+        does not move in any of those cases.
         """
         coords = list(coords)
         # Wrap the orientation triple into [-180, 180) so a yaw computed slightly
@@ -606,58 +720,124 @@ class MyCobotJointController:
             coords[3:] = [self._wrap_angle(a) for a in coords[3:]]
         self._validate_coords(coords)
         self._validate_speed(speed)
-        if mode not in (0, 1):
-            raise ValueError("mode must be 0 (angular) or 1 (linear)")
+
+        angles = self.solve_ik(coords)
+        if angles is None:
+            raise ValueError(
+                "No reliable IK solution for the target pose "
+                "(unreachable, or FK round-trip exceeded tolerance)"
+            )
+        for i, a in enumerate(angles, 1):
+            lo, hi = self.joint_limits[i]
+            if not (lo <= a <= hi):
+                raise ValueError(
+                    f"IK solution joint {i}={a:.1f} exceeds limit [{lo}, {hi}]"
+                )
+
+        # Record both targets so either wait path works; motion is joint-space.
+        self.last_target = list(angles)
         self.last_coords_target = list(coords)
-        # pymycobot 4.0.0: always pass mode explicitly (omitting it sends no
-        # mode byte, which is undefined firmware behaviour).
-        self.mc.send_coords(list(coords), speed, mode)
+        self.mc.send_angles(angles, speed)
 
     def solve_ik(self, target_coords: List[float],
                  current_angles: Optional[List[float]] = None,
-                 retries: int = 3) -> Optional[List[float]]:
+                 pos_tol_mm: float = 2.0,
+                 ori_tol_deg: float = 2.0) -> Optional[List[float]]:
         """Return a 6-joint IK solution (degrees) for target_coords, or None.
 
-        Wraps pymycobot solve_inv_kinematics (firmware IK), which returns a
-        6-element angle list on success, or the int -1 / None when there is no
-        solution OR on a transient read failure; we retry and report None for
-        all non-solution outcomes.
+        Computes IK with ikpy (position + full orientation), seeded from the
+        current joint angles, then VERIFIES the solution with an ikpy FK
+        round-trip: if the resulting pose differs from the request by more than
+        pos_tol_mm / ori_tol_deg, the solution is rejected (returns None). This
+        round-trip gate is what makes self-IK safe to drive the arm with -- a
+        bad/branch solution never reaches send_angles.
+
+        Returns None when the chain is unavailable or no reliable solution
+        exists; never raises for an unreachable pose.
         """
         if len(target_coords) != 6:
             raise ValueError("target_coords must have 6 elements")
-        solver = getattr(self.mc, "solve_inv_kinematics", None)
-        if solver is None:
+        if self.ik_chain is None:
             return None
-        for _ in range(max(1, retries)):
+
+        target = list(target_coords)
+        target[3:] = [self._wrap_angle(a) for a in target[3:]]
+
+        import numpy as np
+        pos_m = np.array(target[:3]) / 1000.0
+        rot = self._euler_xyz_to_matrix(target[3], target[4], target[5])
+
+        if current_angles is None:
             try:
-                seed = (self.get_all_joint_angles() if current_angles is None
-                        else list(current_angles))
-                result = solver(list(target_coords), seed)
-            except Exception:
-                result = None
-            if isinstance(result, (list, tuple)) and len(result) == 6:
-                return list(result)
-            time.sleep(0.05)
-        return None
+                seed_deg = self.get_all_joint_angles()
+            except RuntimeError:
+                seed_deg = [0.0] * 6
+        else:
+            seed_deg = list(current_angles)
+        seed_full = self._ikpy_full_vector(seed_deg)
+
+        try:
+            sol_full = self.ik_chain.inverse_kinematics(
+                target_position=pos_m,
+                target_orientation=rot,
+                orientation_mode="all",
+                initial_position=seed_full,
+            )
+        except Exception:
+            return None
+
+        angles = [self._wrap_angle(math.degrees(sol_full[i]))
+                  for i in self.ik_active_idx]
+
+        # Round-trip verification via FK (the safety gate).
+        fk = self.ikpy_fk(angles)
+        pos_err = math.sqrt(sum((f - t) ** 2 for f, t in zip(fk[:3], target[:3])))
+        ori_err = max(self._angle_delta(f, t) for f, t in zip(fk[3:], target[3:]))
+        if pos_err > pos_tol_mm or ori_err > ori_tol_deg:
+            return None
+        return angles
+
+    def detect_near_limits(self, margin: float = 3.0,
+                           angles: Optional[List[float]] = None) -> List[dict]:
+        """Report joints sitting within `margin` degrees of a limit.
+
+        Surfaces the "deadlock" state observed when a bad Cartesian command
+        drove a joint into its hard stop: callable from /robot/status even when
+        the arm is idle. Returns a list of
+        {joint, angle, limit:[lo,hi], side:"lower"|"upper"} for each near joint.
+        """
+        if angles is None:
+            try:
+                angles = self.get_all_joint_angles()
+            except RuntimeError:
+                return []
+        near = []
+        for i, a in enumerate(angles, 1):
+            lo, hi = self.joint_limits[i]
+            if a <= lo + margin:
+                near.append({"joint": i, "angle": round(a, 2),
+                             "limit": [lo, hi], "side": "lower"})
+            elif a >= hi - margin:
+                near.append({"joint": i, "angle": round(a, 2),
+                             "limit": [lo, hi], "side": "upper"})
+        return near
 
     def check_pose_reachable(self, coords: List[float]
                              ) -> Tuple[bool, str, Optional[List[float]]]:
-        """Best-effort, no-move reachability check for a Cartesian pose.
+        """Decide, WITHOUT moving, whether a Cartesian pose is reachable.
+
+        Uses self-computed ikpy IK with an FK round-trip check (firmware IK is
+        broken), so this is now an authoritative pre-move verdict, not a guess.
 
         Returns (reachable, reason, ik_angles):
           - (False, "out_of_range",  None)     outside the workspace box,
+          - (False, "ik_failed",     None)     no reliable IK solution (unreachable
+                                               or FK round-trip out of tolerance),
           - (False, "joint_limit",   [angles]) IK solved but a joint exceeds its limit,
           - (True,  "ok",            [angles]) IK solved and within joint limits,
-          - (True,  "ok_unverified", None)     in-box but firmware IK returned no
-                                               solution, so reachability cannot be
-                                               confirmed before moving.
-
-        Note: this unit's firmware solve_inv_kinematics returns -1 for EVERY
-        pose (IK unsupported), so in practice every in-box pose is reported
-        "ok_unverified" and the authoritative reachability verdict comes at run
-        time from the error-32 (no IK solution) check in
-        wait_for_coords_completion. The IK branch is kept so the check upgrades
-        automatically if a firmware with working IK is ever installed.
+          - (True,  "ok_unverified", None)     IK chain unavailable (ikpy/URDF
+                                               missing) -> cannot verify; the box
+                                               check passed.
         """
         coords = list(coords)
         if len(coords) == 6:
@@ -666,9 +846,11 @@ class MyCobotJointController:
             self._validate_coords(coords)
         except ValueError:
             return False, "out_of_range", None
+        if self.ik_chain is None:
+            return True, "ok_unverified", None
         ik = self.solve_ik(coords)
         if ik is None:
-            return True, "ok_unverified", None
+            return False, "ik_failed", None
         for i, angle in enumerate(ik, 1):
             lo, hi = self.joint_limits[i]
             if not (lo <= angle <= hi):

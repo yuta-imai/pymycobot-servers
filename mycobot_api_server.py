@@ -118,6 +118,7 @@ class RobotStatusResponse(BaseModel):
     timestamp: str
     error_code: Optional[int] = None
     error_message: Optional[str] = None
+    joints_near_limit: List[dict] = []
 
 
 class GripperStatusResponse(BaseModel):
@@ -660,12 +661,18 @@ async def get_robot_status(include_error: bool = False):
         if include_error:
             error_code, error_message = controller.describe_error()
 
+        # Surface joints sitting at/near a hard limit (the "deadlock" state) so a
+        # stuck arm is visible from status even while idle. Computed from the
+        # angles already read, so it adds no serial round-trip.
+        joints_near_limit = controller.detect_near_limits(angles=joint_angles)
+
         return RobotStatusResponse(
             joint_angles=joint_angles,
             is_moving=is_moving,
             timestamp=get_current_timestamp(),
             error_code=error_code,
             error_message=error_message,
+            joints_near_limit=joints_near_limit,
         )
     except Exception as e:
         raise HTTPException(

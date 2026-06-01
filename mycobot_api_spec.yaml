@@ -737,6 +737,24 @@ components:
           nullable: true
           example: null
           description: "Human-readable error description for error_code"
+        joints_near_limit:
+          type: array
+          description: "Joints within a few degrees of a hard limit (deadlock indicator); empty when clear"
+          items:
+            type: object
+            properties:
+              joint:
+                type: integer
+              angle:
+                type: number
+                format: float
+              limit:
+                type: array
+                items:
+                  type: number
+              side:
+                type: string
+                enum: [lower, upper]
       required:
         - joint_angles
         - is_moving
@@ -989,7 +1007,7 @@ components:
           enum: [0, 1]
           default: 0
           example: 0
-          description: "0 = angular (point-to-point), 1 = linear (straight-line)"
+          description: "Accepted for compatibility but IGNORED — motion is always joint-interpolated via self-computed IK (firmware Cartesian move is unsafe on this unit)"
         validate:
           type: boolean
           default: true
@@ -1103,9 +1121,9 @@ components:
           example: true
         reason:
           type: string
-          enum: [ok, ok_unverified, out_of_range, joint_limit]
-          example: ok_unverified
-          description: "ok = IK solved within limits; ok_unverified = in-box but firmware IK unavailable (verified at run time via error-32); out_of_range / joint_limit = rejected"
+          enum: [ok, ok_unverified, ik_failed, out_of_range, joint_limit]
+          example: ok
+          description: "ok = ikpy IK solved within limits (authoritative); ik_failed = no reliable IK solution; out_of_range / joint_limit = rejected; ok_unverified = ikpy/URDF unavailable, only box check ran"
         ik_angles:
           type: array
           items:
