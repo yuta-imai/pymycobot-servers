@@ -66,6 +66,7 @@ def test_target(mc, j5_target, speed, hold_tol, hold_secs, runaway_deg, watch_ca
     t0 = time.time()
     best = 999.0          # closest (smallest |J5 - target|) seen so far
     best_j5 = None
+    reached = False       # True once J5 has actually arrived near the target
     hold_start = None
     print(f"  {'t':>5} {'J5':>7} {'err':>6}  note")
     while time.time() - t0 < watch_cap:
@@ -78,8 +79,12 @@ def test_target(mc, j5_target, speed, hold_tol, hold_secs, runaway_deg, watch_ca
         if err < best:
             best, best_j5 = err, j5
 
-        # spring-back: J5 was near target, now reversing far away from it
-        if best < runaway_deg + 5 and (j5 - j5_target) > runaway_deg:
+        # Arm spring-back detection ONLY after J5 has genuinely reached the
+        # target zone. (Earlier bug: it fired while J5 was still descending past
+        # the target, mistaking normal approach for a reversal.)
+        if err <= hold_tol:
+            reached = True
+        if reached and err > runaway_deg:
             print(f"  {t:5.1f} {j5:7.1f} {err:6.1f}  SPRING-BACK (best was {best_j5:.1f})")
             go_home(mc, speed)
             return "spring_back"
