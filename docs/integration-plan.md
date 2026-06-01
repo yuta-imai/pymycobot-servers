@@ -16,6 +16,51 @@
 
 ---
 
+# 実装ステータス・重要な設計変更（2026-06-01 実機検証済み）
+
+この節は実機（MyCobot 280, `192.168.0.136:8080`, pymycobot 4.0.0）で確定した事実と、
+それに伴う設計変更を記録する。元の設計（Part 1/2）の前提を一部上書きする。
+
+## ハードウェアで判明した制約
+
+- **firmware の IK は壊れている**: `solve_inv_kinematics` は**全姿勢で `-1`**（解なし）を返す。
+  電源ON・home・可達な姿勢でも同じ。firmware IK は使用不能。
+- **firmware の引数付き FK も壊れている**: `angles_to_coords` は**引数を無視**して現在姿勢を返す。
+- **firmware の Cartesian 移動 (`send_coords`) は危険**: 壊れた IK でゴミ関節角を生成し、
+  実機で暴走（J3 がハードリミットに突入、電源OFF＋手動復帰が必要だった）。**呼んではいけない。**
+- 一方で **`get_coords`（実姿勢読み取り）と `send_angles`（関節移動）は正確**。
+- **把持検証は不可**: `get_gripper_value`/`is_gripper_moving` がこの firmware に無い（501）。
+- **`go_home`（firmware）はハングする**（約4分）。`send_angles([0]*6)` を使う。
+
+## 採用した設計（Part 2 を上書き）
+
+- **Cartesian 制御 = 自前 IK（ikpy + URDF）→ `send_angles`**。
+  - `urdf/mycobot_280_m5.urdf` を ikpy で読み、6関節を名前ベースの active mask で駆動。
+  - **安全ゲート**: `solve_ik` は IK 解を ikpy FK で往復検算し、目標姿勢と
+    **2mm / 2deg** を超えてズレる解は棄却（`None`）。これにより不正解が `send_angles` に到達しない。
+  - ikpy FK は実機 `get_coords` と **2.5〜10mm** で一致（`scripts/verify_fk.py`）、
+    自前IK→`send_angles` の着地誤差は **≤5mm / ≤1.6deg**（`scripts/verify_ik.py --move`）で検証済み。
+- **REST 契約（A0/A0''実装済み）**:
+  - `GET /robot/coords` … 実姿勢 `[x,y,z,rx,ry,rz]`
+  - `PUT /robot/coords` … 自前IK→`send_angles`（`mode` 引数は受理するが無視。常に関節補間）。
+    workspace box 外 / IK解なし / 関節リミット超過は **400 で拒否し、動かさない**。
+  - `POST /robot/coords/check` … 動かさず到達判定（`ok` / `ik_failed` / `out_of_range` /
+    `joint_limit` / `ok_unverified`）。**ikpy 採用後は authoritative**。
+  - `POST /robot/coords/wait` … 位置(mm)＋姿勢(deg)収束 / stall / timeout / auto-stop。
+  - `GET /robot/status` に **`joints_near_limit`**（ハードリミット±3°内の関節）を追加 → デッドロック可視化。
+- **`pick_at` の VALIDATE**: 設計書2.4 の「IK 事前チェック」は **firmware IK ではなく自前 ikpy IK**
+  （`check_pose_reachable`）で実施。pre_grasp / grasp / retreat の3姿勢すべてを動かす前に検証。
+- **把持検証 (VERIFY_GRASP)**: gripper フィードバック不可のため、v1 は掴んで持ち上げ
+  `grasped:"unknown"` / `ok_unverified` を返す（設計書2.7 のとおり）。
+
+## 共有契約への補足
+
+- 元の契約「pymycobot coords 規約」は維持。座標系・単位・Euler 規約は ikpy FK ⇔ 実機 `get_coords`
+  で一致を確認済み（姿勢角の規約も `--move` の `ori_err ≤1.6deg` で裏取り）。
+- home 付近のグリッパー姿勢は実測で `rpy ≈ [-90, 0, -90]`（deg）。`top_down_rpy(yaw)` の起点（A1 で確定）。
+
+---
+
 # Part 1. `vision.locate`
 
 自然言語クエリから、対象の **基準座標系での 3D 位置と yaw** を返す。読み取り専用・冪等（ただしシーンが変われば結果は変わる）。
@@ -277,8 +322,18 @@ arm の `wait_for_movement` の `reason`（converged/stalled/timeout）を、上
 ---
 
 ## 次に詰めるべき項目（TODO）
-- `top_down_rpy(yaw)` を MyCobot のオイラー規約で具体化（実機で rx,ry,rz を確定）
+
+**完了（実機検証済み）**
+- ~~Cartesian 制御の土台~~ → A0/A0'' で自前 ikpy IK→`send_angles` を実装・検証済み（上の実装ステータス節）
+- ~~`get_gripper_status` 修復~~ → firmware に該当 API が無いと判明。修復不能のため `ok_unverified` で割り切り（設計変更）
+
+**進行中 / 残り**
+- **A1（次）**: `top_down_rpy(yaw)` を確定。home 実測 `rpy ≈ [-90,0,-90]` を起点に、グリッパー鉛直下向きの
+  rx,ry,rz と yaw→軸の写像を実機で詰める（ikpy 経由で `check`/`coords` を使い、動かす前に検証）。
+- **A2**: `pick_at` 状態機械（VALIDATE は `check_pose_reachable`=自前IK、移動は `PUT /robot/coords`、
+  把持検証は skip→`ok_unverified`）。
 - `place_at` の状態機械（pick_at とほぼ対称: 接近→降下→開→退避＋「本当に離した」検証）
-- `get_gripper_status` 修復（把持検証の前提）
 - 較正手順書（内部パラメータ → ArUco ハンドアイ → 平面 z₀ 確定 → クリックしたピクセルへ動かして実測誤差）
 - パラメータ実機チューニング（clearance / offset / empty_close_value / 各 speed）
+
+> 注: `get_gripper_status` 修復・firmware IK 依存は **不可と確定**したので TODO から除外（上の実装ステータス節参照）。
