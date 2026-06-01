@@ -76,11 +76,15 @@
 - **ヨー反転（アームを真上から180°回す）は無効**: `get_coords` は基準座標系で返るため運動学不変、
   ヨー回転は重力トルクも変えない（実機で同一 coords を確認）。これは依然有効な結論。
 - **設計への反映**:
-  - 完全な鉛直真下把持は**可能**。`top_down_rpy(yaw)` は **ikpy IK に「真下向き＋yaw」の姿勢を
-    逆算させて**生成する（固定 rpy 公式は持たない。手探り不要）。
-  - yaw は真下軸まわりの回転として姿勢行列に組み込み、ikpy が J1/J6 等へ配分。
-  - VALIDATE は `check_pose_reachable`（自前IK＋関節リミット）でそのまま担保。横向きに倒れる
-    ような苦しい解（J5 が ±90 寄り）は到達/負荷的に避けるよう、必要なら seed/コストで誘導。
+  - 完全な鉛直真下把持は**可能**。実装は `solve_topdown_ik(x, y, z, yaw)`（controller）。
+  - **真下は「tool-Z 軸だけ拘束」で出す**: ikpy `orientation_mode="Z"`（target = [0,0,-1]）。
+    full rotation matrix を与えると ry≈±90 のジンバル退化で破綻する（手書き行列で ori_err 90°
+    を確認済み）ため、approach 軸のみ拘束し、手首の残り自由度はアームに委ねる。
+  - **yaw は J6 へ重畳**: tool-Z 鉛直のとき dJ6 と tool-X の azimuth は **傾き -1**（実測:
+    dJ6 +30 → yaw -30）。よって `J6 = base_J6 + (natural_yaw - yaw_deg)`。平行グリッパーは
+    対称なので J6 がリミット外なら 180° flip で代替。
+  - **検証結果（`scripts/verify_topdown.py --no-connect`）**: テーブル全域×yaw{0,45,90,-45}の
+    全16ケースで **downness +1.000 / J5≈0 / yaw_err 0.0**。実機 `--move` 着地確認は次段。
 
 ---
 
