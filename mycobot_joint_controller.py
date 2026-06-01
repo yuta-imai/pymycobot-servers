@@ -683,6 +683,48 @@ class MyCobotJointController:
             full[slot] = math.radians(a)
         return full
 
+    @staticmethod
+    def top_down_rotation(yaw_deg: float = 0.0):
+        """Rotation matrix for a straight-DOWN gripper, rotated by yaw about vertical.
+
+        Convention: the tool approach axis (tool-Z, 3rd column) points to base -Z
+        (straight down at the table). tool-X/tool-Y span the horizontal plane and
+        `yaw_deg` spins them about the vertical, so the gripper's opening lines up
+        with the object's principal axis. yaw is measured in the base XY plane
+        (atan2(y, x) convention), matching vision.locate's yaw_deg.
+
+        Returns a 3x3 numpy rotation matrix (base<-tool).
+        """
+        import numpy as np
+        cy, sy = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+        # tool-Z = -Z (down). tool-X and tool-Y rotate by yaw in the XY plane.
+        tool_x = [cy, sy, 0.0]
+        tool_y = [-sy, cy, 0.0]
+        tool_z = [0.0, 0.0, -1.0]
+        # Columns are the tool axes expressed in the base frame.
+        return np.array([
+            [tool_x[0], tool_y[0], tool_z[0]],
+            [tool_x[1], tool_y[1], tool_z[1]],
+            [tool_x[2], tool_y[2], tool_z[2]],
+        ])
+
+    def top_down_pose(self, x: float, y: float, z: float,
+                      yaw_deg: float = 0.0) -> List[float]:
+        """Build a top-down grasp pose [x, y, z, rx, ry, rz] (mm / deg).
+
+        Position is (x, y, z); orientation is gripper-straight-down rotated by
+        yaw (top_down_rotation). The rpy is derived from that rotation matrix so
+        it round-trips through solve_ik/send_coords like any other pose.
+
+        Note: tool-Z straight-down puts ry at the gimbal boundary (≈±90), where
+        the XYZ-Euler rx/rz split is not unique. That is fine here because
+        send_coords/solve_ik consume the rpy by rebuilding the SAME matrix via
+        _euler_xyz_to_matrix and IK targets the matrix, not the individual
+        Euler angles. (verify with scripts/verify_topdown.py before relying on it.)
+        """
+        rpy = self._matrix_to_euler_xyz(self.top_down_rotation(yaw_deg))
+        return [float(x), float(y), float(z)] + rpy
+
     def ikpy_fk(self, angles_deg: List[float]) -> List[float]:
         """Forward kinematics via ikpy: 6 joint angles (deg) -> pose mm/deg.
 
