@@ -710,17 +710,14 @@ class MyCobotJointController:
 
     def top_down_pose(self, x: float, y: float, z: float,
                       yaw_deg: float = 0.0) -> List[float]:
-        """Build a top-down grasp pose [x, y, z, rx, ry, rz] (mm / deg).
+        """Build a top-down grasp pose [x, y, z, rx, ry, rz] (mm / deg) for DISPLAY.
 
-        Position is (x, y, z); orientation is gripper-straight-down rotated by
-        yaw (top_down_rotation). The rpy is derived from that rotation matrix so
-        it round-trips through solve_ik/send_coords like any other pose.
-
-        Note: tool-Z straight-down puts ry at the gimbal boundary (≈±90), where
-        the XYZ-Euler rx/rz split is not unique. That is fine here because
-        send_coords/solve_ik consume the rpy by rebuilding the SAME matrix via
-        _euler_xyz_to_matrix and IK targets the matrix, not the individual
-        Euler angles. (verify with scripts/verify_topdown.py before relying on it.)
+        WARNING: straight-down orientation sits at the XYZ-Euler gimbal boundary
+        (ry≈±90), where the rpy triple LOSES yaw — round-tripping this rpy back
+        to a matrix does not reproduce the intended yaw. So this is only safe for
+        human-readable reporting / logging. To actually COMMAND a top-down grasp,
+        use the matrix path: solve_ik_matrix / send_pose_matrix with
+        top_down_rotation(yaw). (Verified by scripts/verify_topdown.py.)
         """
         rpy = self._matrix_to_euler_xyz(self.top_down_rotation(yaw_deg))
         return [float(x), float(y), float(z)] + rpy
@@ -781,33 +778,87 @@ class MyCobotJointController:
         self.last_coords_target = list(coords)
         self.mc.send_angles(angles, speed)
 
+    def send_pose_matrix(self, xyz_mm: List[float], rot, speed: int = 30) -> None:
+        """Move to position + rotation MATRIX via self-IK -> send_angles.
+
+        Gimbal-safe counterpart of send_coords for top-down / straight-down
+        grasps where the rpy Euler representation would lose yaw. Validates the
+        workspace box and joint limits; raises ValueError (no motion) if the pose
+        is out of range, has no reliable IK solution, or violates a joint limit.
+        """
+        xyz_mm = [float(v) for v in xyz_mm]
+        self._validate_speed(speed)
+        # Validate position against the box (orientation is a valid matrix).
+        for value, lo, hi, label in zip(xyz_mm, self.coords_min[:3],
+                                        self.coords_max[:3], self._COORD_LABELS[:3]):
+            if not (lo <= value <= hi):
+                raise ValueError(
+                    f"Coord {label}={value} out of workspace range [{lo}, {hi}]"
+                )
+
+        angles = self.solve_ik_matrix(xyz_mm, rot)
+        if angles is None:
+            raise ValueError(
+                "No reliable IK solution for the target pose "
+                "(unreachable, or FK round-trip exceeded tolerance)"
+            )
+        for i, a in enumerate(angles, 1):
+            lo, hi = self.joint_limits[i]
+            if not (lo <= a <= hi):
+                raise ValueError(
+                    f"IK solution joint {i}={a:.1f} exceeds limit [{lo}, {hi}]"
+                )
+
+        self.last_target = list(angles)
+        # Record an rpy form too (best-effort) so the joint wait path works.
+        self.last_coords_target = xyz_mm + self._matrix_to_euler_xyz(rot)
+        self.mc.send_angles(angles, speed)
+
     def solve_ik(self, target_coords: List[float],
                  current_angles: Optional[List[float]] = None,
                  pos_tol_mm: float = 2.0,
                  ori_tol_deg: float = 2.0) -> Optional[List[float]]:
-        """Return a 6-joint IK solution (degrees) for target_coords, or None.
+        """Return a 6-joint IK solution (degrees) for an rpy pose, or None.
 
-        Computes IK with ikpy (position + full orientation), seeded from the
-        current joint angles, then VERIFIES the solution with an ikpy FK
-        round-trip: if the resulting pose differs from the request by more than
-        pos_tol_mm / ori_tol_deg, the solution is rejected (returns None). This
-        round-trip gate is what makes self-IK safe to drive the arm with -- a
-        bad/branch solution never reaches send_angles.
-
-        Returns None when the chain is unavailable or no reliable solution
-        exists; never raises for an unreachable pose.
+        Thin wrapper over solve_ik_matrix: builds the target rotation matrix from
+        the [rx,ry,rz] Euler triple. For straight-down (gimbal) orientations the
+        Euler triple is degenerate (loses yaw), so callers that need exact yaw
+        (e.g. top-down grasps) should use solve_ik_matrix with a rotation matrix.
         """
         if len(target_coords) != 6:
             raise ValueError("target_coords must have 6 elements")
+        target = list(target_coords)
+        target[3:] = [self._wrap_angle(a) for a in target[3:]]
+        rot = self._euler_xyz_to_matrix(target[3], target[4], target[5])
+        return self.solve_ik_matrix(target[:3], rot, current_angles,
+                                    pos_tol_mm, ori_tol_deg)
+
+    def solve_ik_matrix(self, xyz_mm: List[float], rot,
+                        current_angles: Optional[List[float]] = None,
+                        pos_tol_mm: float = 2.0,
+                        ori_tol_deg: float = 2.0) -> Optional[List[float]]:
+        """Return a 6-joint IK solution (degrees) for position + rotation MATRIX.
+
+        Computes IK with ikpy (position + full orientation), seeded from the
+        current joint angles, then VERIFIES the solution with an ikpy FK
+        round-trip done in ROTATION-MATRIX space (not Euler), so it is correct
+        even at gimbal-boundary orientations like straight-down. If the FK pose
+        differs from the request by more than pos_tol_mm / ori_tol_deg the
+        solution is rejected (returns None). This round-trip gate is what makes
+        self-IK safe to drive the arm with.
+
+        Args:
+            xyz_mm: target position [x, y, z] in mm.
+            rot: 3x3 target rotation matrix (base<-tool), e.g. top_down_rotation().
+
+        Returns None when the chain is unavailable or no reliable solution exists.
+        """
         if self.ik_chain is None:
             return None
 
-        target = list(target_coords)
-        target[3:] = [self._wrap_angle(a) for a in target[3:]]
-
         import numpy as np
-        pos_m = np.array(target[:3]) / 1000.0
-        rot = self._euler_xyz_to_matrix(target[3], target[4], target[5])
+        rot = np.asarray(rot, dtype=float)
+        pos_m = np.array(xyz_mm, dtype=float) / 1000.0
 
         if current_angles is None:
             try:
@@ -831,13 +882,32 @@ class MyCobotJointController:
         angles = [self._wrap_angle(math.degrees(sol_full[i]))
                   for i in self.ik_active_idx]
 
-        # Round-trip verification via FK (the safety gate).
-        fk = self.ikpy_fk(angles)
-        pos_err = math.sqrt(sum((f - t) ** 2 for f, t in zip(fk[:3], target[:3])))
-        ori_err = max(self._angle_delta(f, t) for f, t in zip(fk[3:], target[3:]))
+        # Round-trip verification (the safety gate), in matrix space so it holds
+        # at gimbal orientations. Position from FK; orientation by comparing the
+        # achieved rotation matrix against the requested one.
+        fk_frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles))
+        fk_pos_mm = [float(v) * 1000.0 for v in fk_frame[:3, 3]]
+        pos_err = math.sqrt(sum((f - t) ** 2 for f, t in zip(fk_pos_mm, xyz_mm)))
+        ori_err = self._rotation_angle_error(fk_frame[:3, :3], rot)
         if pos_err > pos_tol_mm or ori_err > ori_tol_deg:
             return None
         return angles
+
+    @staticmethod
+    def _rotation_angle_error(R_a, R_b) -> float:
+        """Geodesic angle (degrees) between two rotation matrices.
+
+        theta = arccos((trace(R_aᵀ R_b) - 1) / 2). Frame-independent, so it is a
+        correct orientation error even at gimbal-boundary poses (unlike per-axis
+        Euler comparison).
+        """
+        import numpy as np
+        R_a = np.asarray(R_a, dtype=float)
+        R_b = np.asarray(R_b, dtype=float)
+        m = R_a.T @ R_b
+        cos_theta = (np.trace(m) - 1.0) / 2.0
+        cos_theta = max(-1.0, min(1.0, float(cos_theta)))
+        return math.degrees(math.acos(cos_theta))
 
     def detect_near_limits(self, margin: float = 3.0,
                            angles: Optional[List[float]] = None) -> List[dict]:

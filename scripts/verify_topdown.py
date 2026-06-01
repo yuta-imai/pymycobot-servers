@@ -69,25 +69,31 @@ def offline_checks(ctrl):
     print(f"  worst round-trip matrix error: {worst_rt:.4f} "
           f"({'OK' if worst_rt < 1e-3 else 'PROBLEM: rpy does not encode the down matrix'})\n")
 
-    print("== 2/3) solve_ik downness + yaw behaviour (does it point DOWN?) ==")
+    print("== 2/3) solve_ik_matrix: downness + yaw actually applied (matrix path) ==")
+    print("   tool-X should rotate with yaw: angle(tool-X, base+X) ~ yaw")
     ok = True
     for (x, y, z) in TEST_POINTS:
         for yaw in TEST_YAWS:
-            pose = ctrl.top_down_pose(x, y, z, yaw)
-            ik = ctrl.solve_ik(pose)
+            rot = ctrl.top_down_rotation(yaw)
+            ik = ctrl.solve_ik_matrix([x, y, z], rot)
             if ik is None:
-                print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+5.1f} -> solve_ik None (unreachable?)")
+                print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+5.1f} -> None (unreachable?)")
                 continue
             frame = ctrl.ik_chain.forward_kinematics(ctrl._ikpy_full_vector(ik))
             tz = [frame[i, 2] for i in range(3)]
+            tx = [frame[i, 0] for i in range(3)]
             d = downness(tz)
+            # measured yaw = angle of tool-X projected on base XY plane
+            meas_yaw = math.degrees(math.atan2(tx[1], tx[0]))
+            yaw_err = abs((meas_yaw - yaw + 180) % 360 - 180)
             j5 = ik[4]
-            flag = "" if d > 0.9 else "  <-- NOT down!"
-            if d <= 0.9:
+            bad = d <= 0.9 or yaw_err > 5.0
+            if bad:
                 ok = False
+            flag = "" if not bad else "  <-- PROBLEM"
             print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+6.1f}  J5 {j5:+6.1f}  "
-                  f"downness {d:+.3f}{flag}")
-    print(f"\n  overall: {'all poses point down' if ok else 'SOME poses not down — revisit top_down_rotation'}")
+                  f"downness {d:+.3f}  measured_yaw {meas_yaw:+6.1f} (err {yaw_err:4.1f}){flag}")
+    print(f"\n  overall: {'down + yaw correct for all poses' if ok else 'PROBLEM — revisit'}")
     return ok
 
 
@@ -127,19 +133,20 @@ def main():
         except Exception:
             pass
 
-    print("\n== LIVE: drive to a few top-down poses (ROBOT MOVES) ==")
+    print("\n== LIVE: drive to a few top-down poses via matrix path (ROBOT MOVES) ==")
     live = [(180.0, 0.0, 180.0, 0.0), (180.0, 0.0, 180.0, 45.0)]
     for (x, y, z, yaw) in live:
-        pose = ctrl.top_down_pose(x, y, z, yaw)
-        reachable, reason, ik = ctrl.check_pose_reachable(pose)
-        print(f"\n  top_down({x:.0f},{y:.0f},{z:.0f}, yaw={yaw:+.0f}) -> {reason}")
-        if not reachable:
+        rot = ctrl.top_down_rotation(yaw)
+        ik = ctrl.solve_ik_matrix([x, y, z], rot)
+        print(f"\n  top_down({x:.0f},{y:.0f},{z:.0f}, yaw={yaw:+.0f}) -> "
+              f"{'IK ok' if ik else 'no IK solution'}")
+        if ik is None:
             print("    not reachable; skipping")
             continue
         try:
-            ctrl.send_coords(pose, speed=args.speed)
+            ctrl.send_pose_matrix([x, y, z], rot, speed=args.speed)
         except ValueError as e:
-            print(f"    send_coords rejected: {e}")
+            print(f"    send_pose_matrix rejected: {e}")
             continue
         time.sleep(4.0)
         real = ctrl._read_coords(retries=3)
