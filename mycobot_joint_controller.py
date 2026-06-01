@@ -738,12 +738,14 @@ class MyCobotJointController:
             return None
 
         # Apply the requested gripper yaw by setting J6 directly. With tool-Z
-        # vertical, J6 spins the gripper about the vertical; the achieved tool-X
-        # azimuth is (natural_azimuth + delta_J6), so solve delta to hit yaw_deg.
+        # vertical, increasing J6 ROTATES the tool-X azimuth by the SAME
+        # magnitude in the OPPOSITE sense (measured on hardware: dJ6 +30 ->
+        # tool-X yaw -30, slope -1). achieved = natural_yaw - (J6 - base_J6), so
+        # to hit yaw_deg: J6 = base_J6 + (natural_yaw - yaw_deg).
         if yaw_deg is not None:
             R = fk_frame[:3, :3]
             natural_yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
-            j6 = self._wrap_angle(angles[5] + (yaw_deg - natural_yaw))
+            j6 = self._wrap_angle(angles[5] + (natural_yaw - yaw_deg))
             lo, hi = self.joint_limits[6]
             if not (lo <= j6 <= hi):
                 # Gripper is symmetric (parallel jaws): a 180° flip is equivalent.
