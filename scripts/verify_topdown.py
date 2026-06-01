@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Verify top_down_pose: does the generated pose actually point the gripper DOWN?
+"""Verify solve_topdown_ik: straight-down grasp with controllable gripper yaw.
 
-A1 final check. top_down_pose(x,y,z,yaw) builds a straight-down grasp pose. We
-must confirm, BEFORE driving the arm, that:
-  1. the rpy round-trips: _euler_xyz_to_matrix(rpy) reproduces top_down_rotation
-     (the gimbal boundary at ry≈±90 could otherwise corrupt it),
-  2. solve_ik finds a solution whose ikpy FK points straight down (downness≈+1),
-  3. yaw actually rotates the tool about vertical without flipping it sideways,
-  4. (optional, --move) the real arm lands pointing down (visual + get_coords).
+A1 final check. solve_topdown_ik(x,y,z,yaw) constrains only the approach axis
+(tool-Z) to straight down (ikpy orientation_mode="Z") and sets the gripper yaw by
+overriding J6. We confirm, BEFORE driving the arm, that across the reachable
+table region and a range of yaws:
+  - a solution is found,
+  - the gripper points straight down (downness >= 0.98),
+  - J5 stays near 0 (away from the servo-strain region near +/-90),
+  - the achieved gripper yaw (azimuth of tool-X) matches the request (or its
+    180 deg flip, since parallel jaws are symmetric).
 
 Offline checks need ikpy + URDF only. --move drives the arm (clear area, e-stop).
 
@@ -23,22 +25,22 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Test points in the reachable table region (mm) and yaws (deg). z kept modest.
-TEST_POINTS = [
-    (180.0, 0.0, 150.0),
-    (180.0, 60.0, 150.0),
-    (150.0, -60.0, 120.0),
-]
+TEST_POINTS = [(180.0, 0.0, 150.0), (180.0, 60.0, 150.0),
+               (150.0, -60.0, 120.0), (200.0, 0.0, 100.0)]
 TEST_YAWS = [0.0, 45.0, 90.0, -45.0]
 
 
-def downness(tz):
+def downness(R):
+    tz = [R[i, 2] for i in range(3)]
     n = math.sqrt(sum(c * c for c in tz)) or 1e-9
     return -tz[2] / n
 
 
-def fmt(v):
-    return "[" + ", ".join(f"{x:7.2f}" for x in v) + "]"
+def yaw_match(achieved, requested):
+    """Smallest error allowing a 180 deg flip (symmetric parallel jaws)."""
+    e1 = abs((achieved - requested + 180) % 360 - 180)
+    e2 = abs((achieved - requested + 360) % 360 - 180)  # +180 flip
+    return min(e1, e2)
 
 
 def make_ctrl_offline():
@@ -56,44 +58,28 @@ def make_ctrl_offline():
 
 
 def offline_checks(ctrl):
-    import numpy as np
-    print("== 1) rpy round-trip: euler(matrix)->matrix reproduces top_down_rotation ==")
-    worst_rt = 0.0
-    for yaw in TEST_YAWS:
-        R = ctrl.top_down_rotation(yaw)
-        rpy = ctrl._matrix_to_euler_xyz(R)
-        R2 = ctrl._euler_xyz_to_matrix(*rpy)
-        err = float(np.max(np.abs(np.array(R) - np.array(R2))))
-        worst_rt = max(worst_rt, err)
-        print(f"  yaw {yaw:+6.1f}  rpy {fmt(rpy)}  max|R-R2| {err:.4f}")
-    print(f"  worst round-trip matrix error: {worst_rt:.4f} "
-          f"({'OK' if worst_rt < 1e-3 else 'PROBLEM: rpy does not encode the down matrix'})\n")
-
-    print("== 2/3) solve_ik_matrix: downness + yaw actually applied (matrix path) ==")
-    print("   tool-X should rotate with yaw: angle(tool-X, base+X) ~ yaw")
+    print("== solve_topdown_ik: down + yaw across the table region ==")
+    print("   want: downness>=0.98, J5 near 0, yaw_err small (180-flip allowed)")
     ok = True
     for (x, y, z) in TEST_POINTS:
         for yaw in TEST_YAWS:
-            rot = ctrl.top_down_rotation(yaw)
-            ik = ctrl.solve_ik_matrix([x, y, z], rot)
-            if ik is None:
-                print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+5.1f} -> None (unreachable?)")
-                continue
-            frame = ctrl.ik_chain.forward_kinematics(ctrl._ikpy_full_vector(ik))
-            tz = [frame[i, 2] for i in range(3)]
-            tx = [frame[i, 0] for i in range(3)]
-            d = downness(tz)
-            # measured yaw = angle of tool-X projected on base XY plane
-            meas_yaw = math.degrees(math.atan2(tx[1], tx[0]))
-            yaw_err = abs((meas_yaw - yaw + 180) % 360 - 180)
-            j5 = ik[4]
-            bad = d <= 0.9 or yaw_err > 5.0
-            if bad:
+            ang = ctrl.solve_topdown_ik(x, y, z, yaw_deg=yaw,
+                                        current_angles=[0, -40, -40, 0, 0, 0])
+            if ang is None:
+                print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+6.1f} -> None")
                 ok = False
+                continue
+            frame = ctrl.ik_chain.forward_kinematics(ctrl._ikpy_full_vector(ang))
+            R = frame[:3, :3]
+            d = downness(R)
+            ach_yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+            yerr = yaw_match(ach_yaw, yaw)
+            bad = d < 0.98 or yerr > 5.0 or abs(ang[4]) > 30
+            ok = ok and not bad
             flag = "" if not bad else "  <-- PROBLEM"
-            print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+6.1f}  J5 {j5:+6.1f}  "
-                  f"downness {d:+.3f}  measured_yaw {meas_yaw:+6.1f} (err {yaw_err:4.1f}){flag}")
-    print(f"\n  overall: {'down + yaw correct for all poses' if ok else 'PROBLEM — revisit'}")
+            print(f"  pt({x:.0f},{y:.0f},{z:.0f}) yaw {yaw:+6.1f}  J5 {ang[4]:+6.1f} "
+                  f"J6 {ang[5]:+7.1f}  downness {d:+.3f}  yaw_err {yerr:4.1f}{flag}")
+    print(f"\n  overall: {'OK — straight down with correct yaw' if ok else 'PROBLEM'}")
     return ok
 
 
@@ -103,13 +89,12 @@ def main():
     p.add_argument("--port", default="/dev/ttyACM0")
     p.add_argument("--baudrate", type=int, default=115200)
     p.add_argument("--no-connect", action="store_true")
-    p.add_argument("--move", action="store_true", help="drive the arm to a couple of poses (MOVES)")
+    p.add_argument("--move", action="store_true", help="drive the arm (MOVES)")
     p.add_argument("--speed", type=int, default=12)
     args = p.parse_args()
 
     if args.no_connect:
-        ctrl = make_ctrl_offline()
-        offline_checks(ctrl)
+        offline_checks(make_ctrl_offline())
         return 0
 
     from mycobot_joint_controller import MyCobotJointController
@@ -133,29 +118,27 @@ def main():
         except Exception:
             pass
 
-    print("\n== LIVE: drive to a few top-down poses via matrix path (ROBOT MOVES) ==")
-    live = [(180.0, 0.0, 180.0, 0.0), (180.0, 0.0, 180.0, 45.0)]
-    for (x, y, z, yaw) in live:
-        rot = ctrl.top_down_rotation(yaw)
-        ik = ctrl.solve_ik_matrix([x, y, z], rot)
-        print(f"\n  top_down({x:.0f},{y:.0f},{z:.0f}, yaw={yaw:+.0f}) -> "
-              f"{'IK ok' if ik else 'no IK solution'}")
-        if ik is None:
-            print("    not reachable; skipping")
+    print("\n== LIVE: drive to a few top-down poses (ROBOT MOVES) ==")
+    for (x, y, z, yaw) in [(180.0, 0.0, 180.0, 0.0), (180.0, 0.0, 180.0, 45.0)]:
+        ang = ctrl.solve_topdown_ik(x, y, z, yaw_deg=yaw)
+        print(f"\n  topdown({x:.0f},{y:.0f},{z:.0f}, yaw={yaw:+.0f}) -> "
+              f"{'IK ok' if ang else 'no solution'}")
+        if ang is None:
             continue
-        try:
-            ctrl.send_pose_matrix([x, y, z], rot, speed=args.speed)
-        except ValueError as e:
-            print(f"    send_pose_matrix rejected: {e}")
+        # joint-limit guard (controller does this in send_coords; here direct)
+        bad = any(not (ctrl.joint_limits[i][0] <= a <= ctrl.joint_limits[i][1])
+                  for i, a in enumerate(ang, 1))
+        if bad:
+            print("    a joint exceeds its limit; skipping")
             continue
+        ctrl.mc.send_angles(ang, args.speed)
         time.sleep(4.0)
         real = ctrl._read_coords(retries=3)
-        ang = ctrl.get_all_joint_angles()
-        frame = ctrl.ik_chain.forward_kinematics(ctrl._ikpy_full_vector(ang))
-        tz = [frame[i, 2] for i in range(3)]
-        print(f"    real coords {fmt(real) if real else real}")
-        print(f"    real J5 {ang[4]:+.1f}  measured downness {downness(tz):+.3f} "
-              f"(should be near +1.0; eyeball the gripper too)")
+        cur = ctrl.get_all_joint_angles()
+        frame = ctrl.ik_chain.forward_kinematics(ctrl._ikpy_full_vector(cur))
+        print(f"    real coords {real}")
+        print(f"    real J5 {cur[4]:+.1f} J6 {cur[5]:+.1f}  "
+              f"downness {downness(frame[:3, :3]):+.3f} (eyeball the gripper too)")
 
     print("\n  returning home")
     ctrl.mc.send_angles([0, 0, 0, 0, 0, 0], args.speed)

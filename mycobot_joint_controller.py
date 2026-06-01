@@ -683,44 +683,77 @@ class MyCobotJointController:
             full[slot] = math.radians(a)
         return full
 
-    @staticmethod
-    def top_down_rotation(yaw_deg: float = 0.0):
-        """Rotation matrix for a straight-DOWN gripper, rotated by yaw about vertical.
+    def solve_topdown_ik(self, x: float, y: float, z: float,
+                         yaw_deg: float = 0.0,
+                         current_angles: Optional[List[float]] = None,
+                         pos_tol_mm: float = 2.0) -> Optional[List[float]]:
+        """IK for a straight-DOWN grasp at (x,y,z) with gripper yaw, or None.
 
-        Convention: the tool approach axis (tool-Z, 3rd column) points to base -Z
-        (straight down at the table). tool-X/tool-Y span the horizontal plane and
-        `yaw_deg` spins them about the vertical, so the gripper's opening lines up
-        with the object's principal axis. yaw is measured in the base XY plane
-        (atan2(y, x) convention), matching vision.locate's yaw_deg.
+        Why this is separate from solve_ik: a full straight-down orientation is
+        at the XYZ-Euler gimbal boundary, so an rpy/full-matrix target is
+        ill-conditioned. Instead we constrain ONLY the approach axis (tool-Z) to
+        point straight down via ikpy orientation_mode="Z" (verified: downness
+        +1.000, J5≈0, stable), let the arm pick a natural wrist, then set the
+        gripper yaw explicitly by overriding J6.
 
-        Returns a 3x3 numpy rotation matrix (base<-tool).
+        yaw_deg: desired gripper opening direction in the base XY plane (the
+        angle of tool-X, atan2(y,x)), matching vision.locate's yaw_deg. null/None
+        yaw leaves the arm's natural wrist (J6 from the Z-constrained solve).
+
+        Returns 6 joint angles (deg) verified by an FK round-trip (position +
+        downness), or None if unreachable / not straight-down / J6 out of range.
         """
+        if self.ik_chain is None:
+            return None
+
         import numpy as np
-        cy, sy = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
-        # tool-Z = -Z (down). tool-X and tool-Y rotate by yaw in the XY plane.
-        tool_x = [cy, sy, 0.0]
-        tool_y = [-sy, cy, 0.0]
-        tool_z = [0.0, 0.0, -1.0]
-        # Columns are the tool axes expressed in the base frame.
-        return np.array([
-            [tool_x[0], tool_y[0], tool_z[0]],
-            [tool_x[1], tool_y[1], tool_z[1]],
-            [tool_x[2], tool_y[2], tool_z[2]],
-        ])
+        if current_angles is None:
+            try:
+                seed_deg = self.get_all_joint_angles()
+            except RuntimeError:
+                seed_deg = [0.0, -40.0, -40.0, 0.0, 0.0, 0.0]
+        else:
+            seed_deg = list(current_angles)
 
-    def top_down_pose(self, x: float, y: float, z: float,
-                      yaw_deg: float = 0.0) -> List[float]:
-        """Build a top-down grasp pose [x, y, z, rx, ry, rz] (mm / deg) for DISPLAY.
+        try:
+            sol_full = self.ik_chain.inverse_kinematics(
+                target_position=np.array([x, y, z], dtype=float) / 1000.0,
+                target_orientation=np.array([0.0, 0.0, -1.0]),
+                orientation_mode="Z",
+                initial_position=self._ikpy_full_vector(seed_deg),
+            )
+        except Exception:
+            return None
+        angles = [self._wrap_angle(math.degrees(sol_full[i]))
+                  for i in self.ik_active_idx]
 
-        WARNING: straight-down orientation sits at the XYZ-Euler gimbal boundary
-        (ry≈±90), where the rpy triple LOSES yaw — round-tripping this rpy back
-        to a matrix does not reproduce the intended yaw. So this is only safe for
-        human-readable reporting / logging. To actually COMMAND a top-down grasp,
-        use the matrix path: solve_ik_matrix / send_pose_matrix with
-        top_down_rotation(yaw). (Verified by scripts/verify_topdown.py.)
-        """
-        rpy = self._matrix_to_euler_xyz(self.top_down_rotation(yaw_deg))
-        return [float(x), float(y), float(z)] + rpy
+        # Verify the Z-constrained solve: position close AND tool pointing down.
+        fk_frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles))
+        fk_pos_mm = [float(v) * 1000.0 for v in fk_frame[:3, 3]]
+        pos_err = math.sqrt(sum((f - t) ** 2
+                                for f, t in zip(fk_pos_mm, (x, y, z))))
+        tz = fk_frame[:3, 2]
+        downness = -float(tz[2]) / (float(np.linalg.norm(tz)) or 1e-9)
+        if pos_err > pos_tol_mm or downness < 0.98:
+            return None
+
+        # Apply the requested gripper yaw by setting J6 directly. With tool-Z
+        # vertical, J6 spins the gripper about the vertical; the achieved tool-X
+        # azimuth is (natural_azimuth + delta_J6), so solve delta to hit yaw_deg.
+        if yaw_deg is not None:
+            R = fk_frame[:3, :3]
+            natural_yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+            j6 = self._wrap_angle(angles[5] + (yaw_deg - natural_yaw))
+            lo, hi = self.joint_limits[6]
+            if not (lo <= j6 <= hi):
+                # Gripper is symmetric (parallel jaws): a 180° flip is equivalent.
+                j6_alt = self._wrap_angle(j6 + 180.0)
+                if lo <= j6_alt <= hi:
+                    j6 = j6_alt
+                else:
+                    return None
+            angles[5] = j6
+        return angles
 
     def ikpy_fk(self, angles_deg: List[float]) -> List[float]:
         """Forward kinematics via ikpy: 6 joint angles (deg) -> pose mm/deg.
