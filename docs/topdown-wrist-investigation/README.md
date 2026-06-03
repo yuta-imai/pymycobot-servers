@@ -145,11 +145,41 @@
    維持）、本ログのスイープ＋top-down で再検証。
 5. [../integration-plan.md](../integration-plan.md) 末尾「較正手順書」TODO と一致。
 
-### 進め方の選択肢（ユーザー判断待ち）
-- **(a)** カメラ外部較正 or 物理治具で接近軸角を定量測定 → 収集スクリプト＆フィットを実装、一緒に回す
-- **(b)**（推奨）まず**較正フレームワーク（収集ランナー＋フィット＋検証）のコード**を実装（ハード不要・安全）
-  → 計測手段が整い次第 (a) を回す
-- **(c)** 別セッションで較正に着手
+### 採用方針: エンド側に加速度センサー（2026-06-02 決定）
+soracam 目視の代わりに、**グリッパー（フランジ）に剛固定した加速度センサーで重力ベクトルを
+定量測定**し較正する。静止時 `g_sensor = R_mount^T·R_flange(q)^T·g_world`。接近軸の鉛直からの
+傾きを 1°未満で直接測れる。原理的限界＝**鉛直まわりヨーは不可観測**（＝J6自転、把持時に開放
+する分なので傾き較正には無害）。
+- センサー: **WitMotion WT9011DCL（BLE5.0 9軸, 9g, 40h電池, roll/pitch精度0.2°）**を採用。
+  Pi が BLE で読む。**MyCobot の M5 FW には触れない**（だから M5 IMU は不採用）。
+  - プロトコル（実装済み）: service `FFE5`／notify `FFE4`。`0x55 0x61` の20バイト結合パケット
+    （accel/gyro/angle が int16LE, 加速度=raw/32768×16g, 角速度=raw/32768×2000°/s）。
+  - **生の加速度（重力ベクトル, roll/pitch 0.2°）を使用**。ヨー(Z,磁気依存1°)は使わない
+    （モーター/金属の磁気乱れ回避＋本手法はヨー不可観測前提）。角速度は静止判定に流用可。
+  - 取付は**フランジに剛固定**（`R_mount` 一定が命）。較正中は動かさない。
+
+### 実装済み: 較正フレームワーク `scripts/wrist_calib/`（option (b) を実装）
+ハード非依存・オフライン検証済み。BLE 実装だけ品番確定後に差し込む。
+- `gravity_source.py` — `GravitySource` 抽象 + `Manual`/`Replay` + **`BLEGravitySource`**。
+  **WT9011DCL の WitMotion パーサ実装済み・テスト済み**（結合/単フレーム両対応・通知分割を
+  またぐバッファリング・ジャイロも抽出）。`bleak` 使用（Pi: `pip install bleak`）。nus/beacon は
+  別センサー用スタブとして残置。
+- `poses.py` — 較正姿勢生成（単関節スイープ/J4×J5格子/J1・腕ピッチ変種）。`default_set`=78姿勢。
+- `collect.py` — **実機ホストで実行**。各姿勢で move→静止→関節角・coords・安定重力を記録し JSONL 出力。
+  `--dry-run` でセンサ＋姿勢列を実機なしで素振り可。firmware send_coords/go_home は不使用。
+- `calibrate.py` — オフラインで補正キネマティクス（DH補正＋`R_mount`＋base傾き）を最小二乗フィット＋
+  k-fold 交差検証。`--selftest` は合成データで自己回復を確認（姿勢誤差 22.75°→0.05°）。
+- 既知の縮退: 加速度のみでは J6 オフセットと `R_mount` の接近軸まわり成分が分離不能（＝ヨー不可観測）。
+  合計の予測重力は一致するので傾き較正に影響なし。必要ならジャイロ/磁気で後日分離可能。
+
+### 次の具体ステップ
+1. WT9011DCL をフランジに剛固定 → Pi に `pip install bleak` → BLE 疎通確認
+   （`collect.py --provider ble --ble-name WT9011DCL --pose-set quick --dry-run` で受信を確認）。
+   ※ パーサは実装済み。必要なら `--ble-address <MAC>` で直指定。
+2. `collect.py --provider ble --pose-set default --out calib.jsonl` でデータ収集（実機, 78姿勢）。
+3. `calibrate.py --data calib.jsonl` でフィット＆CV → 残差が小さければ採用。
+4. 補正モデルを `solve_ik`/`solve_topdown_ik` に組込み（接近軸＝J6軸を真下拘束・J6はヨー開放、
+   現行 `orientation_mode="X"` を置換）。安全ゲート維持のまま本日のスイープ＋top-down で再検証。
 
 ---
 
