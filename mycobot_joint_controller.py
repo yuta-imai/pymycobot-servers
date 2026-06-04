@@ -48,6 +48,15 @@ class MyCobotJointController:
         os.path.dirname(os.path.abspath(__file__)),
         "urdf", "mycobot_280_m5.urdf",
     )
+    # Corrected wrist kinematics, identified from an end-effector accelerometer
+    # (scripts/wrist_calib/). The vendored URDF/official DH wrist is wrong for this
+    # unit (top-down grasps came out ~45deg off); this DH table reproduces the
+    # measured gripper orientation to ~3.4deg. Used by solve_topdown_ik. See
+    # docs/topdown-wrist-investigation/README.md.
+    _CORRECTED_MODEL_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "scripts", "wrist_calib", "corrected_model.json",
+    )
 
 
     def __init__(self, port: str = "/dev/ttyACM0", baudrate: int = 115200):
@@ -106,6 +115,16 @@ class MyCobotJointController:
             self._init_ik_chain()
         except Exception as exc:  # noqa: BLE001 - record and continue
             self.ik_error = str(exc)
+
+        # Corrected wrist model (accelerometer-calibrated DH); guarded like ikpy.
+        self._cm_dh = None
+        self._cm_signs = None
+        self._cm_mount = None
+        self._cm_error: Optional[str] = None
+        try:
+            self._load_corrected_model()
+        except Exception as exc:  # noqa: BLE001
+            self._cm_error = str(exc)
     
     def _validate_joint_number(self, joint_num: int) -> None:
         """Validate joint number is within valid range."""
@@ -683,36 +702,146 @@ class MyCobotJointController:
             full[slot] = math.radians(a)
         return full
 
-    # The physical gripper approach axis (direction the fingers point / the arm
-    # descends to grasp) is ikpy tool-X, NOT tool-Z. Verified on hardware: at
-    # joints [0,0,-90,0,90,0] the gripper points straight down (world -Z) and
-    # ikpy tool-X = [0,0,-1] there, while tool-Z = [0,1,0] (horizontal). The
-    # earlier tool-Z assumption was wrong and produced horizontal "top-down"
-    # grasps.
-    _APPROACH_AXIS_COL = 0  # tool-X column of the FK rotation matrix
+    # ------------------------------------------------------------------
+    # Accelerometer-calibrated wrist model (scripts/wrist_calib/). The gripper
+    # APPROACH axis (direction the fingers point) is the J6 rotation axis = the
+    # z-axis of DH frame 5, pointing toward the gripper (world-down at a top-down
+    # pose). The earlier ikpy/URDF tool-X assumption was wrong for this unit.
+    # ------------------------------------------------------------------
+    _APPROACH_AXIS_COL = 0  # tool-X column (legacy ikpy fallback only)
+
+    def _load_corrected_model(self) -> None:
+        import json
+        if not os.path.exists(self._CORRECTED_MODEL_PATH):
+            raise FileNotFoundError(
+                f"corrected model not found at {self._CORRECTED_MODEL_PATH}")
+        with open(self._CORRECTED_MODEL_PATH) as f:
+            data = json.load(f)
+        self._cm_dh = [list(r) for r in data["dh"]]   # [d_mm, a_mm, alpha, theta_off]
+        self._cm_signs = [float(s) for s in data["signs"]]
+        self._cm_mount = data.get("mount_rotvec")
+
+    @staticmethod
+    def _dh_matrix(theta, d, a, alpha):
+        import numpy as np
+        ct, st = math.cos(theta), math.sin(theta)
+        ca, sa = math.cos(alpha), math.sin(alpha)
+        return np.array([[ct, -st * ca, st * sa, a * ct],
+                         [st, ct * ca, -ct * sa, a * st],
+                         [0.0, sa, ca, d],
+                         [0.0, 0.0, 0.0, 1.0]])
+
+    def _cm_frames(self, angles_deg: List[float]):
+        """DH frames 0..6 (4x4, mm) for the corrected model."""
+        import numpy as np
+        T = np.eye(4)
+        frames = [T]
+        for i in range(6):
+            d, a, alpha, off = self._cm_dh[i]
+            theta = math.radians(angles_deg[i]) * self._cm_signs[i] + off
+            T = T @ self._dh_matrix(theta, d, a, alpha)
+            frames.append(T)
+        return frames
+
+    def corrected_fk(self, angles_deg: List[float]) -> List[float]:
+        """FK via the accel-calibrated model: 6 angles (deg) -> [x,y,z, rx,ry,rz].
+
+        Position in mm, orientation in degrees (XYZ Euler). Orientation is
+        hardware-accurate (~3.4deg, accel-verified); position uses the official
+        link lengths (absolute position not independently verified — see docs).
+        """
+        if self._cm_dh is None:
+            raise RuntimeError(f"corrected model unavailable: {self._cm_error}")
+        T = self._cm_frames(angles_deg)[6]
+        pos = [float(v) for v in T[:3, 3]]
+        return pos + self._matrix_to_euler_xyz(T[:3, :3])
+
+    def corrected_approach_axis(self, angles_deg: List[float]) -> List[float]:
+        """Gripper approach axis (J6 rotation axis = z of DH frame 5) in world,
+        unit vector pointing toward the gripper (≈[0,0,-1] at a top-down pose)."""
+        import numpy as np
+        z = self._cm_frames(angles_deg)[5][:3, 2]
+        return [float(v) for v in z / (float(np.linalg.norm(z)) or 1e-9)]
 
     def solve_topdown_ik(self, x: float, y: float, z: float,
                          yaw_deg: Optional[float] = None,
                          current_angles: Optional[List[float]] = None,
-                         pos_tol_mm: float = 2.0) -> Optional[List[float]]:
+                         pos_tol_mm: float = 3.0) -> Optional[List[float]]:
         """IK for a straight-DOWN grasp at (x,y,z), or None if unreachable.
 
-        Constrains the gripper APPROACH axis (tool-X — see _APPROACH_AXIS_COL)
-        to point straight down via ikpy orientation_mode="X" (target [0,0,-1]),
-        letting the arm choose a natural wrist. Verified by an FK round-trip
-        (position + that tool-X actually points down).
+        Uses the accelerometer-calibrated wrist model: solves for joint angles so
+        the gripper APPROACH axis (J6 rotation axis) points world-down and the tip
+        reaches (x,y,z), via a bounded least-squares over the joint limits. The
+        solution is accepted only if an FK round-trip confirms downness >= 0.98 and
+        the position error <= pos_tol_mm, so a bad solve never reaches send_angles.
 
-        yaw_deg: gripper opening direction about the (vertical) approach axis.
-        NOT YET CALIBRATED — which joint rolls the gripper about the approach
-        axis at the straight-down pose still needs a hardware sweep, so for now a
-        non-None yaw_deg is accepted but ignored (natural wrist is used). Tracked
-        as a follow-up; flat objects grasp fine without yaw control.
+        yaw_deg: rotation about the (vertical) approach axis = J6. The yaw->J6
+        mapping is not yet pinned, so a non-None yaw_deg is accepted but ignored
+        (J6 left to the solver). Flat objects grasp fine without yaw control.
 
-        Returns 6 joint angles (deg), or None if unreachable / not down.
+        Falls back to the legacy ikpy method if the corrected model is unavailable.
+        Returns 6 joint angles (deg), or None.
         """
+        if self._cm_dh is None:
+            return self._solve_topdown_ik_ikpy(x, y, z, yaw_deg, current_angles,
+                                               pos_tol_mm)
+        import numpy as np
+        from scipy.optimize import least_squares
+
+        target = np.array([x, y, z], dtype=float)
+        DOWN = np.array([0.0, 0.0, -1.0])
+        lo = np.array([self.joint_limits[i][0] for i in range(1, 7)], float)
+        hi = np.array([self.joint_limits[i][1] for i in range(1, 7)], float)
+
+        seeds = []
+        if current_angles is not None:
+            seeds.append(list(current_angles))
+        else:
+            try:
+                seeds.append(self.get_all_joint_angles())
+            except RuntimeError:
+                pass
+        seeds += [[0, 0, -90, 0, 90, 0], [0, -20, -90, 0, 90, 0],
+                  [10, -30, -80, 20, 70, 0]]
+
+        def resid(q):
+            fr = self._cm_frames(q)
+            ax = fr[5][:3, 2]
+            ax = ax / (float(np.linalg.norm(ax)) or 1e-9)
+            return list((fr[6][:3, 3] - target) * 0.1) + list((ax - DOWN) * 40.0)
+
+        best = None
+        for s in seeds:
+            s = np.clip(np.array(s, float), lo, hi)
+            try:
+                sol = least_squares(resid, s, bounds=(lo, hi), method="trf",
+                                    max_nfev=4000)
+            except Exception:
+                continue
+            q = [float(v) for v in sol.x]
+            fr = self._cm_frames(q)
+            pos_err = float(np.linalg.norm(fr[6][:3, 3] - target))
+            ax = fr[5][:3, 2]
+            downness = -float(ax[2]) / (float(np.linalg.norm(ax)) or 1e-9)
+            in_lim = all(self.joint_limits[i][0] <= q[i - 1] <= self.joint_limits[i][1]
+                         for i in range(1, 7))
+            score = pos_err + (1.0 - downness) * 1000.0
+            if in_lim and (best is None or score < best[0]):
+                best = (score, q, downness, pos_err)
+
+        if best is None:
+            return None
+        _, q, downness, pos_err = best
+        if pos_err > pos_tol_mm or downness < 0.98:
+            return None
+        return q
+
+    def _solve_topdown_ik_ikpy(self, x, y, z, yaw_deg=None,
+                               current_angles=None, pos_tol_mm=2.0):
+        """Legacy top-down IK via ikpy/URDF (WRONG wrist for this unit — kept only
+        as a fallback when the calibrated model is missing). Constrains tool-X."""
         if self.ik_chain is None:
             return None
-
         import numpy as np
         if current_angles is None:
             try:
@@ -721,7 +850,6 @@ class MyCobotJointController:
                 seed_deg = [0.0, 0.0, -90.0, 0.0, 90.0, 0.0]
         else:
             seed_deg = list(current_angles)
-
         try:
             sol_full = self.ik_chain.inverse_kinematics(
                 target_position=np.array([x, y, z], dtype=float) / 1000.0,
@@ -733,8 +861,6 @@ class MyCobotJointController:
             return None
         angles = [self._wrap_angle(math.degrees(sol_full[i]))
                   for i in self.ik_active_idx]
-
-        # Verify: position close AND the APPROACH axis (tool-X) points down.
         fk_frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles))
         fk_pos_mm = [float(v) * 1000.0 for v in fk_frame[:3, 3]]
         pos_err = math.sqrt(sum((f - t) ** 2
