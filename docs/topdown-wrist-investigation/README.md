@@ -172,10 +172,15 @@ soracam 目視の代わりに、**グリッパー（フランジ）に剛固定�
 - 既知の縮退: 加速度のみでは J6 オフセットと `R_mount` の接近軸まわり成分が分離不能（＝ヨー不可観測）。
   合計の予測重力は一致するので傾き較正に影響なし。必要ならジャイロ/磁気で後日分離可能。
 
+### RPi セットアップ（2026-06-03 検証済み）
+- Pi: BlueZ 5.66 / hci0 UP、`~/arms/.venv` に `bleak 3.0.2`+`dbus-fast` 導入済み。
+- WT9011DCL: **アドレス `F7:50:70:EE:0D:DF`（広告名 `WT901BLE67`）。接続はアドレス指定が確実。**
+- 疎通確認OK: `python3 scripts/wrist_calib/collect.py --provider ble \
+  --ble-address F7:50:70:EE:0D:DF --pose-set quick --dry-run`
+  → 静置で `g≈[0.107,0.006,0.994] still=True motion=0.33dps`。生バイトでパーサ検証済み。
+
 ### 次の具体ステップ
-1. WT9011DCL をフランジに剛固定 → Pi に `pip install bleak` → BLE 疎通確認
-   （`collect.py --provider ble --ble-name WT9011DCL --pose-set quick --dry-run` で受信を確認）。
-   ※ パーサは実装済み。必要なら `--ble-address <MAC>` で直指定。
+1. （済）RPi/BLE セットアップ・疎通確認。
 2. `collect.py --provider ble --pose-set default --out calib.jsonl` でデータ収集（実機, 78姿勢）。
 3. `calibrate.py --data calib.jsonl` でフィット＆CV → 残差が小さければ採用。
 4. 補正モデルを `solve_ik`/`solve_topdown_ik` に組込み（接近軸＝J6軸を真下拘束・J6はヨー開放、
