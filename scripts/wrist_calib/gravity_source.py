@@ -224,6 +224,7 @@ class BLEGravitySource(GravitySource):
             self._err = e
 
     async def _main(self):
+        import asyncio  # needed here: this method (not _run) awaits asyncio.sleep
         from bleak import BleakScanner, BleakClient
 
         if self.mode == "beacon":
