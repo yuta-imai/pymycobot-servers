@@ -55,7 +55,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--provider", default="manual",
                     choices=["manual", "ble", "replay"])
-    ap.add_argument("--ble-name", default="WT9011DCL")
+    # This WT9011DCL advertises as "WT901BLE67"; connecting by address is most
+    # reliable (discovered MAC: F7:50:70:EE:0D:DF).
+    ap.add_argument("--ble-name")
     ap.add_argument("--ble-address")
     ap.add_argument("--ble-mode", default="witmotion",
                     choices=["witmotion", "nus", "beacon"])
@@ -69,7 +71,8 @@ def main():
     ap.add_argument("--baudrate", type=int, default=115200)
     ap.add_argument("--speed", type=int, default=20)
     ap.add_argument("--settle", type=float, default=2.5, help="post-move settle (s)")
-    ap.add_argument("--samples", type=int, default=20, help="gravity samples/pose")
+    ap.add_argument("--samples", type=int, default=12,
+                    help="gravity samples/pose (paced ~10Hz to the sensor)")
     ap.add_argument("--dry-run", action="store_true",
                     help="don't move the arm; just exercise sensor + poses")
     args = ap.parse_args()
@@ -106,18 +109,19 @@ def main():
                 except Exception as e:
                     print(f"    read-back failed: {e}")
             try:
-                g, still, std = provider.read_stable(n=args.samples)
+                g, still, motion = provider.read_stable(n=args.samples)
             except KeyboardInterrupt:
                 print("    gravity skipped"); continue
             except Exception as e:
                 print(f"    gravity read failed: {e}"); continue
             rec = {"i": i, "commanded": [round(x, 2) for x in p], "angles": angles,
                    "coords": coords, "gravity": [round(v, 5) for v in g],
-                   "still": bool(still), "std_ratio": round(std, 4)}
+                   "still": bool(still), "motion": round(motion, 4)}
             line = json.dumps(rec)
             if out:
                 out.write(line + "\n"); out.flush()
-            print(f"    g={rec['gravity']} still={still} std={std:.4f}")
+            print(f"    g={rec['gravity']} still={still} motion={motion:.3f}"
+                  f" {'(gyro dps)' if hasattr(provider, 'gyro_magnitude') else '(accel std)'}")
             n_ok += 1
         # park
         if not args.dry_run:

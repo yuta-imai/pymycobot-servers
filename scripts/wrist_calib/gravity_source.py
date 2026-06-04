@@ -37,28 +37,42 @@ class GravitySource:
         """Release any hardware handle. Override if needed."""
 
     # ---- shared helpers -------------------------------------------------
-    def read_stable(self, n: int = 20, period_s: float = 0.02,
-                    max_std_ratio: float = 0.02
+    def read_stable(self, n: int = 12, period_s: float = 0.1,
+                    max_std_ratio: float = 0.03, gyro_still_dps: float = 2.0
                     ) -> Tuple[Tuple[float, float, float], bool, float]:
         """Average n samples; report whether the arm was still.
 
-        Returns (unit_mean_xyz, still, std_ratio). `still` is True when the
-        per-sample magnitude std is below max_std_ratio of the mean magnitude
-        (i.e. no dynamic acceleration / vibration during capture).
+        Returns (unit_mean_xyz, still, motion). When the source also exposes a
+        gyro (gyro_magnitude()), stillness is gyro-based: `motion` is the max
+        angular speed (deg/s) seen and `still = motion < gyro_still_dps` — far
+        more reliable than accel variance at the ~10 Hz sensor rate (a slowly
+        moving arm can show low accel variance yet clear gyro). Without a gyro it
+        falls back to the accel-magnitude std ratio (`motion` = that ratio).
+
+        Default pacing (n=12, period=0.1s ≈ 1.2 s window) matches the WT9011DCL's
+        ~10 Hz stream so each loop sees fresh samples, not repeats.
         """
+        gyro_fn = getattr(self, "gyro_magnitude", None)
         xs: List[Tuple[float, float, float]] = []
+        gyros: List[float] = []
         for _ in range(max(1, n)):
             xs.append(tuple(float(v) for v in self.read()))
+            if gyro_fn is not None:
+                gm = gyro_fn()
+                if gm is not None:
+                    gyros.append(gm)
             time.sleep(period_s)
         mx = sum(x[0] for x in xs) / len(xs)
         my = sum(x[1] for x in xs) / len(xs)
         mz = sum(x[2] for x in xs) / len(xs)
-        mags = [(_x ** 2 + _y ** 2 + _z ** 2) ** 0.5 for _x, _y, _z in xs]
-        mean_mag = sum(mags) / len(mags) or 1e-9
-        std = statistics.pstdev(mags) if len(mags) > 1 else 0.0
-        std_ratio = std / mean_mag
         norm = (mx * mx + my * my + mz * mz) ** 0.5 or 1e-9
         unit = (mx / norm, my / norm, mz / norm)
+        if gyros:
+            motion = max(gyros)
+            return unit, (motion < gyro_still_dps), motion
+        mags = [(_x ** 2 + _y ** 2 + _z ** 2) ** 0.5 for _x, _y, _z in xs]
+        mean_mag = sum(mags) / len(mags) or 1e-9
+        std_ratio = (statistics.pstdev(mags) if len(mags) > 1 else 0.0) / mean_mag
         return unit, (std_ratio <= max_std_ratio), std_ratio
 
 
