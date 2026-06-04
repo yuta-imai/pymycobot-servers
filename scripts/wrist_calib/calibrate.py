@@ -226,10 +226,163 @@ def selftest():
     report(model, sol.x, recs, tag="after")
 
 
+# ==========================================================================
+# Structure search — the official wrist DH is wrong for this unit by ~90deg
+# steps, which a local delta-fit cannot reach. Search sign/offset/alpha on the
+# wrist joints (scored against the accel ground truth, mount solved per candidate
+# via Kabsch), then refine continuously. Produces a corrected DH table to wire
+# into the controller. Generalizes: re-run at any site to recalibrate a unit.
+# ==========================================================================
+WRIST = (3, 4, 5)  # 0-based J4,J5,J6
+
+
+def clean_filter(recs, max_cmd_rb=10.0):
+    """Drop poses whose read-back joints differ from the command by > max_cmd_rb
+    on any joint (arm didn't reach the pose — collision/limit; unreliable)."""
+    out = []
+    for r in recs:
+        cmd, ang = r.get("commanded"), r.get("angles")
+        if cmd and ang and max(abs(c - a) for c, a in zip(cmd, ang)) > max_cmd_rb:
+            continue
+        out.append(r)
+    return out
+
+
+def _fk_signed(q, signs, doff, dalpha):
+    """FK with per-wrist-joint sign, theta-offset delta (rad), alpha delta (rad)."""
+    T = np.eye(4)
+    for i in range(6):
+        d, a, al, off = DH0[i]
+        s, do, da = 1.0, 0.0, 0.0
+        if i in WRIST:
+            k = WRIST.index(i)
+            s, do, da = signs[k], doff[k], dalpha[k]
+        T = T @ dh_matrix(q[i] * DEG * s + off + do, d, a, al + da)
+    return T
+
+
+def _kabsch(A, B):
+    """Best rotation R with R@B[i] ~ A[i] (rows are unit vectors)."""
+    H = np.asarray(B).T @ np.asarray(A)
+    U, _, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    return Vt.T @ np.diag([1, 1, d]) @ U.T
+
+
+def _orient_resid(recs, signs, doff, dalpha, Rm=None):
+    gw = np.array([0, 0, -1.0])
+    A = [_fk_signed(r["angles"], signs, doff, dalpha)[:3, :3].T @ gw for r in recs]
+    B = [np.array(r["gravity"], float) / (np.linalg.norm(r["gravity"]) or 1e-9)
+         for r in recs]
+    if Rm is None:
+        Rm = _kabsch(A, B)
+    errs = [math.degrees(math.acos(max(-1, min(1, float((Rm @ b) @ a)))))
+            for a, b in zip(A, B)]
+    return errs, Rm
+
+
+def structure_search(recs):
+    """Grid over wrist sign/offset/alpha; score with the Kabsch-optimal mount."""
+    import itertools
+    best = None
+    steps = [0.0, math.pi / 2, math.pi, 3 * math.pi / 2]
+    for signs in itertools.product((1.0, -1.0), repeat=3):
+        for doff in itertools.product(steps, repeat=3):
+            for dalpha in itertools.product(steps, repeat=3):
+                errs, _ = _orient_resid(recs, signs, doff, dalpha)
+                m = sum(errs) / len(errs)
+                if best is None or m < best[0]:
+                    best = (m, signs, doff, dalpha)
+    return best  # (mean_err, signs, doff, dalpha)
+
+
+def refine_structure(recs, signs, doff0, dalpha0):
+    """Continuously refine wrist theta-offset + alpha (+ mount) around a structure."""
+    from scipy.optimize import least_squares
+
+    def resid(x):
+        doff = [doff0[k] + x[k] for k in range(3)]
+        dalpha = [dalpha0[k] + x[3 + k] for k in range(3)]
+        Rm = rotvec_to_R(x[6:9])
+        gw = np.array([0, 0, -1.0])
+        r = []
+        for rec in recs:
+            gp = Rm.T @ (_fk_signed(rec["angles"], signs, doff, dalpha)[:3, :3].T @ gw)
+            gp /= (np.linalg.norm(gp) or 1e-9)
+            gm = np.array(rec["gravity"], float); gm /= (np.linalg.norm(gm) or 1e-9)
+            r += list(gp - gm)
+        return r
+
+    sol = least_squares(resid, np.zeros(9), method="lm", max_nfev=40000)
+    doff = [doff0[k] + sol.x[k] for k in range(3)]
+    dalpha = [dalpha0[k] + sol.x[3 + k] for k in range(3)]
+    return signs, doff, dalpha, rotvec_to_R(sol.x[6:9]), sol.x[6:9]
+
+
+def corrected_dh(signs, doff, dalpha):
+    """Return the corrected 6-row DH table + per-joint sign for the controller.
+
+    Each row: [d_mm, a_mm, alpha_rad, theta_offset_rad]; theta_i = sign_i*q_i + off.
+    """
+    rows = [list(r) for r in DH0]
+    full_signs = [1.0] * 6
+    for k, i in enumerate(WRIST):
+        rows[i][2] = (DH0[i][2] + dalpha[k] + math.pi) % (2 * math.pi) - math.pi
+        rows[i][3] = (DH0[i][3] + doff[k] + math.pi) % (2 * math.pi) - math.pi
+        full_signs[i] = signs[k]
+    return rows, full_signs
+
+
+def run_search(recs, args):
+    clean = clean_filter(recs, args.max_cmd_rb)
+    print(f"[calibrate] {len(recs)} poses ({len(clean)} clean, "
+          f"|cmd-readback|<= {args.max_cmd_rb} deg)")
+    m, signs, doff, dalpha = structure_search(clean)
+    print(f"[search] best structure: mean {m:.2f} deg  signs={signs}")
+    signs, doff, dalpha, Rm, rv = refine_structure(clean, signs, doff, dalpha)
+    e_clean, _ = _orient_resid(clean, signs, doff, dalpha, Rm)
+    e_full, _ = _orient_resid(recs, signs, doff, dalpha, Rm)
+    print(f"[refine] orient err deg  clean: mean {np.mean(e_clean):.2f} "
+          f"max {np.max(e_clean):.2f}   full: mean {np.mean(e_full):.2f} "
+          f"max {np.max(e_full):.2f}")
+    # cross-validate the refinement
+    if args.cv and len(clean) >= args.cv:
+        idx = list(range(len(clean)))
+        folds = [idx[i::args.cv] for i in range(args.cv)]
+        cv = []
+        for f in range(args.cv):
+            te = [clean[i] for i in folds[f]]
+            tr = [clean[i] for i in idx if i not in set(folds[f])]
+            s2, d2, a2, Rm2, _ = refine_structure(tr, signs, doff, dalpha)
+            ee, _ = _orient_resid(te, s2, d2, a2, Rm2)
+            cv.append(np.mean(ee))
+        print(f"[refine] {args.cv}-fold CV test mean: {np.mean(cv):.2f} deg")
+    rows, full_signs = corrected_dh(signs, doff, dalpha)
+    print("[result] corrected DH (d_mm, a_mm, alpha_deg, theta_off_deg, sign):")
+    for i, (row, sg) in enumerate(zip(rows, full_signs), 1):
+        print(f"   J{i}: d={row[0]:7.2f} a={row[1]:7.2f} "
+              f"alpha={math.degrees(row[2]):7.2f} off={math.degrees(row[3]):8.2f} "
+              f"sign={sg:+.0f}")
+    if args.out:
+        with open(args.out, "w") as f:
+            json.dump({"dh": rows, "signs": full_signs,
+                       "mount_rotvec": list(rv),
+                       "approach_axis": "J6 rotation axis (z of frame 5)",
+                       "orient_err_deg": {"clean_mean": float(np.mean(e_clean)),
+                                          "full_mean": float(np.mean(e_full))}}, f,
+                      indent=2)
+        print(f"[calibrate] wrote {args.out}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data")
+    ap.add_argument("--search", action="store_true",
+                    help="structure search + refine (use this for the wrist fix)")
+    ap.add_argument("--max-cmd-rb", type=float, default=10.0,
+                    help="drop poses with |command-readback| above this (deg)")
     ap.add_argument("--fit-joints", type=int, nargs="+", default=[4, 5, 6])
     ap.add_argument("--fit-params", nargs="+", default=["alpha", "theta"],
                     choices=["d", "a", "alpha", "theta"])
@@ -246,6 +399,9 @@ def main():
 
     recs = load_data(args.data)
     recs = [r for r in recs if r.get("still", True)]
+    if args.search:
+        return run_search(recs, args)
+
     print(f"[calibrate] {len(recs)} usable poses from {args.data}")
     model = WristModel(tuple(args.fit_joints), tuple(args.fit_params), args.basetilt)
     report(model, model.x0(), recs, tag="before")

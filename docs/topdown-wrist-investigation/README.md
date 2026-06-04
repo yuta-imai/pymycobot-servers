@@ -179,8 +179,26 @@ soracam 目視の代わりに、**グリッパー（フランジ）に剛固定�
   --ble-address F7:50:70:EE:0D:DF --pose-set quick --dry-run`
   → 静置で `g≈[0.107,0.006,0.994] still=True motion=0.33dps`。生バイトでパーサ検証済み。
 
+### 較正実施・補正モデル取得（2026-06-03 完了）
+- 78姿勢を `collect.py --pose-set default` で収集（全 still=True）。データ:
+  `scripts/wrist_calib/calib_2026-06-03.jsonl`。
+- `calibrate.py --search` で補正キネマティクスを同定（構造探索＋連続精密化＋mount）:
+  - **公式モデル＋最適取付回転でも残差 mean 29°**（加速度の真値で公式手首が不一致と確定）。
+  - **補正後: clean mean 3.19° / full 3.39° / 5-fold CV 3.38°**（汎化）。
+  - 補正の核心は **J5 の符号反転**（＋J4/J6 の α・offset を ~90–180° 補正）。これが
+    J4↔J5 平面入れ替わり・J6 tilt↔roll 混同の正体。
+  - 成果物: `scripts/wrist_calib/corrected_model.json`（補正DH＋sign＋mount）。
+  - 注: 残差の worst は J6 大角度（±90–150 で 13–16°, read-back は一致）。取付軸と J6 軸の
+    微小ズレ由来とみられ、真下把持（downness 主体・J6 はヨー）には影響小。
+- 再現: `python3 scripts/wrist_calib/calibrate.py --data scripts/wrist_calib/calib_2026-06-03.jsonl --search`
+
 ### 次の具体ステップ
-1. （済）RPi/BLE セットアップ・疎通確認。
+0. （済）RPi/BLE セットアップ・78姿勢収集・補正モデル同定。
+1. **【次】統合**: `corrected_model.json` の DH＋sign で controller の FK を差し替え
+   （`_init_ik_chain`/`ikpy_fk`/`solve_ik`/`solve_topdown_ik`）。接近軸＝J6回転軸を真下拘束・
+   J6 はヨー開放。安全ゲート（FK往復・workspace・joint limit）は維持。
+2. 実機再検証: 本日のスイープ＋top-down を補正モデルで再実行し downness を確認。
+   - 旧ステップ（参考・完了済み）:
 2. `collect.py --provider ble --pose-set default --out calib.jsonl` でデータ収集（実機, 78姿勢）。
 3. `calibrate.py --data calib.jsonl` でフィット＆CV → 残差が小さければ採用。
 4. 補正モデルを `solve_ik`/`solve_topdown_ik` に組込み（接近軸＝J6軸を真下拘束・J6はヨー開放、
