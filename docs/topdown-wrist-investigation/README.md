@@ -19,6 +19,14 @@
   `solve_topdown_ik(x,y,z)`（`orientation_mode="X"` で tool-X 軸を真下に拘束）。
 - よって「`solve_topdown_ik` が実機で真下を向くか」を検証した。
 
+## 解決済み（2026-06-04 実機検証）
+`solve_topdown_ik` を accel 較正済み手首モデルに差し替え、実機で再検証完了:
+4つの異なる top-down 目標に駆動し、各点でエンドの WT9011DCL が測る重力ベクトルが
+**最大 6.5° のばらつき**に収まった（＝腕の構成が変わっても接近軸が常に鉛直＝真下）。
+**元の ~45°ずれ → ~6.5°**。目視（`img/06_topdown_fixed_accel_verified.jpg`）でもグリッパーは
+真下。残課題: 位置の絶対精度は未検証（ハンドアイ較正で対応予定）／solve_ik 一般姿勢と
+send_coords はまだ旧 ikpy のまま（top-down のみ補正モデル化）。
+
 ## 結論（先に）
 
 1. **`solve_topdown_ik` は実機で真下を向かない。約45°オーバーハングする。**
