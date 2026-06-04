@@ -132,7 +132,7 @@ class BLEGravitySource(GravitySource):
 
     def __init__(self, address: Optional[str] = None, name: Optional[str] = None,
                  mode: str = "witmotion", char_uuid: Optional[str] = None,
-                 timeout_s: float = 12.0):
+                 timeout_s: float = 20.0):
         self.address = address      # MAC (Linux) or UUID (macOS); None -> match by name
         self.name = name
         self.mode = mode            # "witmotion" | "nus" | "beacon"
@@ -142,57 +142,43 @@ class BLEGravitySource(GravitySource):
         self.timeout_s = timeout_s
         self._latest: Optional[Tuple[float, float, float]] = None
         self._gyro: Optional[Tuple[float, float, float]] = None  # for stillness
-        self._buf = bytearray()
+        # The notify callback ONLY stores raw bytes (cannot throw -> can't kill the
+        # BLE stream); decoding happens in read(), in the caller's thread. An
+        # earlier design parsed inside the callback and a parse hiccup silently
+        # froze the stream (stale _latest forever). Keep callbacks trivial.
+        self._raw_latest: Optional[bytes] = None
         self._thread = None
         self._loop = None
         self._stop = False
         self._err = None
         self._start()
 
-    # -- device-specific parsing -----------------------------------------
-    def _parse_witmotion(self, data: bytes) -> Optional[Tuple[float, float, float]]:
-        """WT9011DCL BLE5.0 stream. Buffers bytes and scans for frames.
+    # -- device-specific decoding (pure; called from read()) -------------
+    @staticmethod
+    def _decode_witmotion(data: bytes):
+        """Decode ONE WT9011DCL packet. Returns (ax,ay,az,gx,gy,gz) or None.
 
-        Combined packet (20 B): 0x55 0x61 + accel,gyro,angle (9x int16 LE).
+        Combined packet (20 B): 0x55 0x61 + accel,gyro,angle (9x int16 LE):
           accel(g)=raw/32768*16, gyro(deg/s)=raw/32768*2000, angle(deg)=raw/32768*180
-        Also handles the 11 B single frames 0x55 0x51 (accel) / 0x55 0x52 (gyro).
-        Returns the latest accel (gx,gy,gz) in g, or None. Sets self._gyro.
+        Also accepts the 11 B accel frame 0x55 0x51 (gyro fields -> None).
+        Each BLE notification carries exactly one packet, so no buffering needed.
         """
         import struct
-        self._buf.extend(data)
-        if len(self._buf) > 256:           # cap buffer
-            del self._buf[:-64]
-        latest = None
-        i = 0
-        b = self._buf
-        while i < len(b) - 1:
+        b = bytes(data)
+        for i in range(len(b) - 1):
             if b[i] != 0x55:
-                i += 1
                 continue
             t = b[i + 1]
             if t == 0x61 and i + 20 <= len(b):
                 v = struct.unpack_from("<hhhhhhhhh", b, i + 2)
-                latest = (v[0] / 32768.0 * 16.0, v[1] / 32768.0 * 16.0,
-                          v[2] / 32768.0 * 16.0)
-                self._gyro = (v[3] / 32768.0 * 2000.0, v[4] / 32768.0 * 2000.0,
-                              v[5] / 32768.0 * 2000.0)
-                i += 20
-            elif t == 0x51 and i + 11 <= len(b):
-                v = struct.unpack_from("<hhhh", b, i + 2)
-                latest = (v[0] / 32768.0 * 16.0, v[1] / 32768.0 * 16.0,
-                          v[2] / 32768.0 * 16.0)
-                i += 11
-            elif t == 0x52 and i + 11 <= len(b):
-                v = struct.unpack_from("<hhhh", b, i + 2)
-                self._gyro = (v[0] / 32768.0 * 2000.0, v[1] / 32768.0 * 2000.0,
-                              v[2] / 32768.0 * 2000.0)
-                i += 11
-            elif t in (0x61, 0x51, 0x52):
-                break                       # partial frame; wait for more bytes
-            else:
-                i += 1
-        del b[:i]                           # drop consumed bytes
-        return latest
+                return (v[0] / 32768.0 * 16.0, v[1] / 32768.0 * 16.0,
+                        v[2] / 32768.0 * 16.0, v[3] / 32768.0 * 2000.0,
+                        v[4] / 32768.0 * 2000.0, v[5] / 32768.0 * 2000.0)
+            if t == 0x51 and i + 11 <= len(b):
+                v = struct.unpack_from("<hhh", b, i + 2)
+                return (v[0] / 32768.0 * 16.0, v[1] / 32768.0 * 16.0,
+                        v[2] / 32768.0 * 16.0, None, None, None)
+        return None
 
     @staticmethod
     def _parse_nus_line(data: bytes) -> Optional[Tuple[float, float, float]]:
@@ -214,14 +200,18 @@ class BLEGravitySource(GravitySource):
         import threading
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        # wait for first sample
+
+        def have_sample():
+            return self._raw_latest is not None or self._latest is not None
         t0 = time.time()
-        while self._latest is None and time.time() - t0 < self.timeout_s:
+        while not have_sample() and self._err is None and time.time() - t0 < self.timeout_s:
             time.sleep(0.05)
-        if self._latest is None:
+        if self._err is not None:
+            raise RuntimeError(f"BLE connect failed: {self._err}")
+        if not have_sample():
             raise TimeoutError(
-                "No BLE accel sample within timeout. Check device/address/mode "
-                "and the _parse_* payload format."
+                "No BLE sample within timeout. Is the sensor on and free (only one "
+                "central can connect)? Try --ble-address, or power-cycle the sensor."
             )
 
     def _run(self):
@@ -256,13 +246,15 @@ class BLEGravitySource(GravitySource):
             if dev is None:
                 raise RuntimeError(f"BLE device named {self.name!r} not found")
             address = dev.address
-        parse = self._parse_witmotion if self.mode == "witmotion" else \
-            (lambda d: self._parse_nus_line(d))
         async with BleakClient(address) as client:
             def on_notify(_handle, data: bytearray):
-                v = parse(bytes(data))
-                if v is not None:
-                    self._latest = v
+                # trivial + exception-free: just stash the raw bytes
+                if self.mode == "witmotion":
+                    self._raw_latest = bytes(data)
+                else:  # nus
+                    v = self._parse_nus_line(bytes(data))
+                    if v is not None:
+                        self._latest = v
             await client.start_notify(self.char_uuid, on_notify)
             while not self._stop:
                 await asyncio.sleep(0.05)
@@ -278,12 +270,25 @@ class BLEGravitySource(GravitySource):
         return (self._gyro[0] ** 2 + self._gyro[1] ** 2 + self._gyro[2] ** 2) ** 0.5
 
     def read(self) -> Tuple[float, float, float]:
+        if self.mode == "witmotion":
+            if self._raw_latest is None and self._latest is None:
+                raise RuntimeError("no BLE sample yet")
+            dec = self._decode_witmotion(self._raw_latest) if self._raw_latest else None
+            if dec is not None:
+                self._latest = dec[0:3]
+                if dec[3] is not None:
+                    self._gyro = dec[3:6]
+            if self._latest is None:
+                raise RuntimeError("no decodable WitMotion packet yet")
+            return self._latest
         if self._latest is None:
             raise RuntimeError("no BLE sample yet")
         return self._latest
 
     def close(self) -> None:
         self._stop = True
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)  # let stop_notify + disconnect complete
 
 
 def make_source(kind: str, **kw) -> GravitySource:
