@@ -38,7 +38,7 @@ class GravitySource:
 
     # ---- shared helpers -------------------------------------------------
     def read_stable(self, n: int = 12, period_s: float = 0.1,
-                    max_std_ratio: float = 0.03, gyro_still_dps: float = 2.0
+                    max_std_ratio: float = 0.03, gyro_still_dps: float = 2.5
                     ) -> Tuple[Tuple[float, float, float], bool, float]:
         """Average n samples; report whether the arm was still.
 
@@ -68,7 +68,9 @@ class GravitySource:
         norm = (mx * mx + my * my + mz * mz) ** 0.5 or 1e-9
         unit = (mx / norm, my / norm, mz / norm)
         if gyros:
-            motion = max(gyros)
+            # median, not max: MyCobot servos emit occasional holding-jitter
+            # spikes (2-4 deg/s) that don't move gravity but would trip a max gate.
+            motion = statistics.median(gyros)
             return unit, (motion < gyro_still_dps), motion
         mags = [(_x ** 2 + _y ** 2 + _z ** 2) ** 0.5 for _x, _y, _z in xs]
         mean_mag = sum(mags) / len(mags) or 1e-9
@@ -92,7 +94,7 @@ class ManualGravitySource(GravitySource):
             raise ValueError("need exactly 3 numbers")
         return float(parts[0]), float(parts[1]), float(parts[2])
 
-    def read_stable(self, n=1, period_s=0.0, max_std_ratio=1.0):
+    def read_stable(self, n=1, period_s=0.0, max_std_ratio=1.0, gyro_still_dps=2.5):
         x = self.read()
         norm = (x[0] ** 2 + x[1] ** 2 + x[2] ** 2) ** 0.5 or 1e-9
         return (x[0] / norm, x[1] / norm, x[2] / norm), True, 0.0

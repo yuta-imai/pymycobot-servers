@@ -70,9 +70,13 @@ def main():
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--baudrate", type=int, default=115200)
     ap.add_argument("--speed", type=int, default=20)
-    ap.add_argument("--settle", type=float, default=2.5, help="post-move settle (s)")
+    ap.add_argument("--settle", type=float, default=3.0, help="post-move settle (s)")
     ap.add_argument("--samples", type=int, default=12,
                     help="gravity samples/pose (paced ~10Hz to the sensor)")
+    ap.add_argument("--still-dps", type=float, default=2.5,
+                    help="stillness gate: median gyro (deg/s) below this = still")
+    ap.add_argument("--retries", type=int, default=2,
+                    help="re-read (with extra settle) if not still")
     ap.add_argument("--dry-run", action="store_true",
                     help="don't move the arm; just exercise sensor + poses")
     args = ap.parse_args()
@@ -109,7 +113,14 @@ def main():
                 except Exception as e:
                     print(f"    read-back failed: {e}")
             try:
-                g, still, motion = provider.read_stable(n=args.samples)
+                g, still, motion = provider.read_stable(
+                    n=args.samples, gyro_still_dps=args.still_dps)
+                tries = 0
+                while not still and tries < args.retries:
+                    tries += 1
+                    time.sleep(0.8)  # let a jitter burst pass
+                    g, still, motion = provider.read_stable(
+                        n=args.samples, gyro_still_dps=args.still_dps)
             except KeyboardInterrupt:
                 print("    gravity skipped"); continue
             except Exception as e:
