@@ -7,16 +7,16 @@
   <link rel="icon" href="data:," />
   <style>
     :root {
-      --bg: #0e1116;
-      --panel: #161b22;
-      --panel2: #1c232d;
-      --border: #2b3340;
-      --text: #d7dde5;
-      --muted: #8b97a6;
-      --accent: #4da3ff;
-      --good: #51cf66;
-      --warn: #ffd43b;
-      --bad: #ff6b6b;
+      --bg: #eef1f4;
+      --panel: #ffffff;
+      --panel2: #f3f5f8;
+      --border: #d5dbe2;
+      --text: #1f2933;
+      --muted: #67727f;
+      --accent: #2b7fff;
+      --good: #2f9e44;
+      --warn: #d9a400;
+      --bad: #e03131;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
@@ -30,7 +30,7 @@
     #overlay {
       position: absolute; top: 10px; left: 12px; font-size: 12px;
       color: var(--muted); pointer-events: none; line-height: 1.6;
-      text-shadow: 0 1px 2px #000;
+      text-shadow: 0 1px 2px rgba(255,255,255,.8);
     }
     #panel {
       flex: 0 0 340px; background: var(--panel); border-left: 1px solid var(--border);
@@ -50,11 +50,11 @@
     input[type=number] { width: 70px; flex: 0 0 auto; }
     button { cursor: pointer; }
     button:hover { border-color: var(--accent); }
-    button.primary { background: var(--accent); color: #04121f; border-color: var(--accent); font-weight: 600; }
+    button.primary { background: var(--accent); color: #ffffff; border-color: var(--accent); font-weight: 600; }
     .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px; }
-    .pill.good { background: rgba(81,207,102,.15); color: var(--good); }
-    .pill.bad  { background: rgba(255,107,107,.15); color: var(--bad); }
-    .pill.idle { background: rgba(139,151,166,.15); color: var(--muted); }
+    .pill.good { background: rgba(47,158,68,.14); color: var(--good); }
+    .pill.bad  { background: rgba(224,49,49,.14); color: var(--bad); }
+    .pill.idle { background: rgba(103,114,127,.14); color: var(--muted); }
     table.kv { width: 100%; border-collapse: collapse; }
     table.kv td { padding: 2px 4px; }
     table.kv td:first-child { color: var(--muted); width: 30px; }
@@ -65,7 +65,7 @@
     .jbox .lbl { color: var(--muted); font-size: 10px; }
     .jbox .val { font-size: 14px; font-variant-numeric: tabular-nums; }
     .hint { color: var(--muted); font-size: 11px; line-height: 1.5; margin: 4px 0; }
-    #cam { width: 100%; border-radius: 6px; border: 1px solid var(--border); display: none; background:#000; }
+    #cam { width: 100%; border-radius: 6px; border: 1px solid var(--border); display: none; background:#e3e7ec; }
     .legend { display:flex; gap:12px; font-size:11px; margin-top:6px; }
     .legend span { display:flex; align-items:center; gap:4px; }
     .dot { width:10px; height:10px; border-radius:2px; display:inline-block; }

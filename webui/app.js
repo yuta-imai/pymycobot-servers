@@ -41,7 +41,7 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0e1116);
+scene.background = new THREE.Color(0xeef1f4);
 
 const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 100);
 camera.up.set(0, 0, 1); // URDF is Z-up
@@ -57,7 +57,7 @@ dir.position.set(1, -1, 2);
 scene.add(dir);
 
 // Z-up grid (GridHelper lies in XZ; rotate into XY).
-const grid = new THREE.GridHelper(1, 20, 0x33405a, 0x222a36);
+const grid = new THREE.GridHelper(1, 20, 0x9aa7b6, 0xcdd5de);
 grid.rotation.x = Math.PI / 2;
 scene.add(grid);
 
