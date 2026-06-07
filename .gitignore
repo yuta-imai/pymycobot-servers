@@ -3,3 +3,8 @@ dist/
 build/
 .venv/
 __pycache__/
+# vision calibration outputs / capture bursts
+scripts/vision/calib/
+scripts/vision/captures/
+scripts/vision/*.png
+scripts/vision/__pycache__/
