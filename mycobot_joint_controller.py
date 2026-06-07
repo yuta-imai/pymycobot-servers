@@ -6,6 +6,8 @@ MyCobot robot using the pymycobot library.
 """
 
 from pymycobot import MyCobot
+import os
+import math
 import time
 from collections import deque
 from typing import Union, List, Optional, Tuple
@@ -27,6 +29,34 @@ class MyCobotJointController:
         33: "Linear motion has no adjacent solution",
         34: "Linear motion has no adjacent solution",
     }
+
+    # The 6 actuated revolute joints (J1..J6) in the MyCobot 280 m5 URDF, in
+    # order. We compute IK ourselves with ikpy because this unit's firmware IK
+    # (solve_inv_kinematics) is broken (returns -1 for every pose); firmware FK
+    # is broken too (angles_to_coords ignores its argument). ikpy FK was verified
+    # against the live robot to 2.5-10 mm (scripts/verify_fk.py), so self-IK with
+    # an FK round-trip check is the trustworthy path.
+    _IK_ACTIVE_JOINT_NAMES = (
+        "joint2_to_joint1",
+        "joint3_to_joint2",
+        "joint4_to_joint3",
+        "joint5_to_joint4",
+        "joint6_to_joint5",
+        "joint6output_to_joint6",
+    )
+    _URDF_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "urdf", "mycobot_280_m5.urdf",
+    )
+    # Corrected wrist kinematics, identified from an end-effector accelerometer
+    # (scripts/wrist_calib/). The vendored URDF/official DH wrist is wrong for this
+    # unit (top-down grasps came out ~45deg off); this DH table reproduces the
+    # measured gripper orientation to ~3.4deg. Used by solve_topdown_ik. See
+    # docs/topdown-wrist-investigation/README.md.
+    _CORRECTED_MODEL_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "scripts", "wrist_calib", "corrected_model.json",
+    )
 
 
     def __init__(self, port: str = "/dev/ttyACM0", baudrate: int = 115200):
@@ -59,12 +89,42 @@ class MyCobotJointController:
         self.gripper_value_limits = (0, 100)
         self.valid_gripper_states = {0, 1, 10}  # 0=open, 1=close, 10=release
 
+        # Cartesian workspace limits for the MyCobot 280, from pymycobot
+        # robot_info.py (key "MyCobot280"): [x, y, z] in mm, [rx, ry, rz] in deg.
+        self.coords_min = [-350.0, -350.0, -70.0, -180.0, -180.0, -180.0]
+        self.coords_max = [350.0, 350.0, 523.9, 180.0, 180.0, 180.0]
+
         # Last commanded target (6-element vector), used by wait_for_completion.
         # last-write-wins: every motion command overwrites it.
         self.last_target: Optional[List[float]] = None
 
+        # Last commanded Cartesian target, used by wait_for_coords_completion.
+        self.last_coords_target: Optional[List[float]] = None
+
         # Last sampled (timestamp, angles) for stateful is_moving computation.
         self._last_angle_sample: Optional[Tuple[float, List[float]]] = None
+
+        # ikpy kinematic chain for self-computed IK/FK (firmware IK is broken).
+        # Built lazily and guarded: if ikpy or the URDF is missing, IK methods
+        # report unavailability but joint/gripper control still works, so the
+        # server never fails to start over a missing kinematics dependency.
+        self.ik_chain = None
+        self.ik_active_idx: Optional[List[int]] = None
+        self.ik_error: Optional[str] = None
+        try:
+            self._init_ik_chain()
+        except Exception as exc:  # noqa: BLE001 - record and continue
+            self.ik_error = str(exc)
+
+        # Corrected wrist model (accelerometer-calibrated DH); guarded like ikpy.
+        self._cm_dh = None
+        self._cm_signs = None
+        self._cm_mount = None
+        self._cm_error: Optional[str] = None
+        try:
+            self._load_corrected_model()
+        except Exception as exc:  # noqa: BLE001
+            self._cm_error = str(exc)
     
     def _validate_joint_number(self, joint_num: int) -> None:
         """Validate joint number is within valid range."""
@@ -313,12 +373,23 @@ class MyCobotJointController:
         return bool(result)
     
     def get_all_joint_angles(self) -> List[float]:
-        """Get current angles of all joints."""
-        angles = self.mc.get_angles()
-        # Handle case where robot returns -1 on communication failure
-        if angles == -1 or angles is None:
-            return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]  # Return default/safe angles
-        return angles
+        """Get current angles of all joints.
+
+        Retries a few times: pymycobot's get_angles() can intermittently return
+        -1/None or raise on a transient serial read. After retries are exhausted
+        it raises RuntimeError (rather than fabricating an all-zeros home pose)
+        so the REST layer surfaces a 503 and motion/IK logic never acts on fake
+        angles. Callers that can tolerate a miss (poll loops) should catch it.
+        """
+        for _ in range(3):
+            try:
+                angles = self.mc.get_angles()
+            except Exception:
+                angles = None
+            if isinstance(angles, (list, tuple)) and len(angles) == 6:
+                return list(angles)
+            time.sleep(0.05)
+        raise RuntimeError("Failed to read joint angles from robot")
     
     def move_all_joints(self, angles: List[float], speed: int = 50) -> None:
         """
@@ -469,7 +540,10 @@ class MyCobotJointController:
         history = deque()  # (timestamp, angles)
         while True:
             now = time.monotonic()
-            cur = self.get_all_joint_angles()
+            try:
+                cur = self.get_all_joint_angles()
+            except RuntimeError:
+                cur = None
             if cur is None or len(cur) != len(target):
                 # Transient read failure; retry until timeout.
                 if now - start > timeout:
@@ -502,6 +576,652 @@ class MyCobotJointController:
                 self._force_stop()
                 return {"completed": False, "reason": "timeout",
                         "elapsed": now - start, "max_error": err}
+
+            time.sleep(poll)
+
+    # ------------------------------------------------------------------
+    # Cartesian (coordinate-space) control
+    # ------------------------------------------------------------------
+
+    # Labels for the 6-element coords vector [x, y, z, rx, ry, rz].
+    _COORD_LABELS = ("x", "y", "z", "rx", "ry", "rz")
+
+    @staticmethod
+    def _angle_delta(a: float, b: float) -> float:
+        """Smallest absolute difference between two angles in degrees (wraps ±180)."""
+        return abs((a - b + 180.0) % 360.0 - 180.0)
+
+    @staticmethod
+    def _wrap_angle(a: float) -> float:
+        """Normalize an angle into [-180, 180)."""
+        return (a + 180.0) % 360.0 - 180.0
+
+    def _read_coords(self, retries: int = 3) -> Optional[List[float]]:
+        """Read the current Cartesian pose, or None on failure.
+
+        pymycobot 4.0.0 get_coords() returns [x, y, z, rx, ry, rz] (mm / deg),
+        or the int -1 (read retries exhausted) / None (frame parse failure).
+        Any of those, a wrong length, or an exception is reported as None so the
+        caller can retry instead of acting on a bad reading. Note -1 is truthy,
+        so an isinstance/len check (not `if not coords`) is required.
+        """
+        for _ in range(max(1, retries)):
+            try:
+                coords = self.mc.get_coords()
+            except Exception:
+                coords = None
+            if isinstance(coords, (list, tuple)) and len(coords) == 6:
+                return list(coords)
+            time.sleep(0.05)
+        return None
+
+    def get_coords(self, retries: int = 3) -> List[float]:
+        """Return the current Cartesian pose [x, y, z, rx, ry, rz] (mm / deg).
+
+        Raises RuntimeError if the pose cannot be read, so the REST layer
+        surfaces a 503 instead of a fabricated pose.
+        """
+        coords = self._read_coords(retries=retries)
+        if coords is None:
+            raise RuntimeError("Failed to read coordinates from robot")
+        return coords
+
+    def _validate_coords(self, coords: List[float]) -> None:
+        """Validate a 6-element Cartesian target against the 280 workspace box."""
+        if len(coords) != 6:
+            raise ValueError(
+                f"Must provide exactly 6 coords [x,y,z,rx,ry,rz], got {len(coords)}"
+            )
+        for value, lo, hi, label in zip(coords, self.coords_min,
+                                        self.coords_max, self._COORD_LABELS):
+            if not (lo <= value <= hi):
+                raise ValueError(
+                    f"Coord {label}={value} out of workspace range [{lo}, {hi}]"
+                )
+
+    # ---- ikpy kinematic model (self-computed IK/FK) ----
+
+    def _init_ik_chain(self) -> None:
+        """Build the ikpy chain from the URDF, with a name-matched active mask.
+
+        Raises if ikpy/URDF are unavailable or the 6 actuated joints cannot be
+        identified; __init__ catches that and records self.ik_error.
+        """
+        from ikpy.chain import Chain
+
+        if not os.path.exists(self._URDF_PATH):
+            raise FileNotFoundError(f"URDF not found at {self._URDF_PATH}")
+        chain = Chain.from_urdf_file(self._URDF_PATH, base_elements=["g_base"])
+        names = [link.name for link in chain.links]
+        mask = [name in self._IK_ACTIVE_JOINT_NAMES for name in names]
+        if sum(mask) != 6:
+            raise RuntimeError(
+                f"Expected 6 active joints in URDF chain, got {sum(mask)} "
+                f"(links: {names})"
+            )
+        chain.active_links_mask = mask
+        self.ik_chain = chain
+        self.ik_active_idx = [i for i, m in enumerate(mask) if m]
+
+    @staticmethod
+    def _euler_xyz_to_matrix(rx: float, ry: float, rz: float):
+        """Build a rotation matrix from XYZ Euler angles in degrees (R = Rz·Ry·Rx).
+
+        Matches the convention recovered by _matrix_to_euler_xyz, which was
+        verified against the robot's get_coords orientation to within a degree.
+        """
+        import numpy as np
+        ax, ay, az = math.radians(rx), math.radians(ry), math.radians(rz)
+        cx, sx = math.cos(ax), math.sin(ax)
+        cy, sy = math.cos(ay), math.sin(ay)
+        cz, sz = math.cos(az), math.sin(az)
+        Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+        Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+        Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+        return Rz @ Ry @ Rx
+
+    @staticmethod
+    def _matrix_to_euler_xyz(R) -> List[float]:
+        """Recover XYZ Euler angles (degrees) from a rotation matrix."""
+        sy = math.sqrt(R[0, 0] ** 2 + R[1, 0] ** 2)
+        if sy > 1e-6:
+            rx = math.atan2(R[2, 1], R[2, 2])
+            ry = math.atan2(-R[2, 0], sy)
+            rz = math.atan2(R[1, 0], R[0, 0])
+        else:  # gimbal lock (ry ≈ ±90)
+            rx = math.atan2(-R[1, 2], R[1, 1])
+            ry = math.atan2(-R[2, 0], sy)
+            rz = 0.0
+        return [math.degrees(rx), math.degrees(ry), math.degrees(rz)]
+
+    def _ikpy_full_vector(self, angles_deg: List[float]):
+        """Map 6 joint angles (deg) onto the full ikpy link vector (radians)."""
+        import numpy as np
+        full = np.zeros(len(self.ik_chain.links))
+        for slot, a in zip(self.ik_active_idx, angles_deg):
+            full[slot] = math.radians(a)
+        return full
+
+    # ------------------------------------------------------------------
+    # Accelerometer-calibrated wrist model (scripts/wrist_calib/). The gripper
+    # APPROACH axis (direction the fingers point) is the J6 rotation axis = the
+    # z-axis of DH frame 5, pointing toward the gripper (world-down at a top-down
+    # pose). The earlier ikpy/URDF tool-X assumption was wrong for this unit.
+    # ------------------------------------------------------------------
+    _APPROACH_AXIS_COL = 0  # tool-X column (legacy ikpy fallback only)
+
+    def _load_corrected_model(self) -> None:
+        import json
+        if not os.path.exists(self._CORRECTED_MODEL_PATH):
+            raise FileNotFoundError(
+                f"corrected model not found at {self._CORRECTED_MODEL_PATH}")
+        with open(self._CORRECTED_MODEL_PATH) as f:
+            data = json.load(f)
+        self._cm_dh = [list(r) for r in data["dh"]]   # [d_mm, a_mm, alpha, theta_off]
+        self._cm_signs = [float(s) for s in data["signs"]]
+        self._cm_mount = data.get("mount_rotvec")
+
+    @staticmethod
+    def _dh_matrix(theta, d, a, alpha):
+        import numpy as np
+        ct, st = math.cos(theta), math.sin(theta)
+        ca, sa = math.cos(alpha), math.sin(alpha)
+        return np.array([[ct, -st * ca, st * sa, a * ct],
+                         [st, ct * ca, -ct * sa, a * st],
+                         [0.0, sa, ca, d],
+                         [0.0, 0.0, 0.0, 1.0]])
+
+    def _cm_frames(self, angles_deg: List[float]):
+        """DH frames 0..6 (4x4, mm) for the corrected model."""
+        import numpy as np
+        T = np.eye(4)
+        frames = [T]
+        for i in range(6):
+            d, a, alpha, off = self._cm_dh[i]
+            theta = math.radians(angles_deg[i]) * self._cm_signs[i] + off
+            T = T @ self._dh_matrix(theta, d, a, alpha)
+            frames.append(T)
+        return frames
+
+    def corrected_fk(self, angles_deg: List[float]) -> List[float]:
+        """FK via the accel-calibrated model: 6 angles (deg) -> [x,y,z, rx,ry,rz].
+
+        Position in mm, orientation in degrees (XYZ Euler). Orientation is
+        hardware-accurate (~3.4deg, accel-verified); position uses the official
+        link lengths (absolute position not independently verified — see docs).
+        """
+        if self._cm_dh is None:
+            raise RuntimeError(f"corrected model unavailable: {self._cm_error}")
+        T = self._cm_frames(angles_deg)[6]
+        pos = [float(v) for v in T[:3, 3]]
+        return pos + self._matrix_to_euler_xyz(T[:3, :3])
+
+    def corrected_approach_axis(self, angles_deg: List[float]) -> List[float]:
+        """Gripper approach axis (J6 rotation axis = z of DH frame 5) in world,
+        unit vector pointing toward the gripper (≈[0,0,-1] at a top-down pose)."""
+        import numpy as np
+        z = self._cm_frames(angles_deg)[5][:3, 2]
+        return [float(v) for v in z / (float(np.linalg.norm(z)) or 1e-9)]
+
+    def solve_topdown_ik(self, x: float, y: float, z: float,
+                         yaw_deg: Optional[float] = None,
+                         current_angles: Optional[List[float]] = None,
+                         pos_tol_mm: float = 3.0) -> Optional[List[float]]:
+        """IK for a straight-DOWN grasp at (x,y,z), or None if unreachable.
+
+        Uses the accelerometer-calibrated wrist model: solves for joint angles so
+        the gripper APPROACH axis (J6 rotation axis) points world-down and the tip
+        reaches (x,y,z), via a bounded least-squares over the joint limits. The
+        solution is accepted only if an FK round-trip confirms downness >= 0.98 and
+        the position error <= pos_tol_mm, so a bad solve never reaches send_angles.
+
+        yaw_deg: rotation about the (vertical) approach axis = J6. The yaw->J6
+        mapping is not yet pinned, so a non-None yaw_deg is accepted but ignored
+        (J6 left to the solver). Flat objects grasp fine without yaw control.
+
+        Falls back to the legacy ikpy method if the corrected model is unavailable.
+        Returns 6 joint angles (deg), or None.
+        """
+        if self._cm_dh is None:
+            return self._solve_topdown_ik_ikpy(x, y, z, yaw_deg, current_angles,
+                                               pos_tol_mm)
+        import numpy as np
+        from scipy.optimize import least_squares
+
+        target = np.array([x, y, z], dtype=float)
+        DOWN = np.array([0.0, 0.0, -1.0])
+        lo = np.array([self.joint_limits[i][0] for i in range(1, 7)], float)
+        hi = np.array([self.joint_limits[i][1] for i in range(1, 7)], float)
+
+        seeds = []
+        if current_angles is not None:
+            seeds.append(list(current_angles))
+        else:
+            try:
+                seeds.append(self.get_all_joint_angles())
+            except RuntimeError:
+                pass
+        seeds += [[0, 0, -90, 0, 90, 0], [0, -20, -90, 0, 90, 0],
+                  [10, -30, -80, 20, 70, 0]]
+
+        def resid(q):
+            fr = self._cm_frames(q)
+            ax = fr[5][:3, 2]
+            ax = ax / (float(np.linalg.norm(ax)) or 1e-9)
+            return list((fr[6][:3, 3] - target) * 0.1) + list((ax - DOWN) * 40.0)
+
+        best = None
+        for s in seeds:
+            s = np.clip(np.array(s, float), lo, hi)
+            try:
+                sol = least_squares(resid, s, bounds=(lo, hi), method="trf",
+                                    max_nfev=4000)
+            except Exception:
+                continue
+            q = [float(v) for v in sol.x]
+            fr = self._cm_frames(q)
+            pos_err = float(np.linalg.norm(fr[6][:3, 3] - target))
+            ax = fr[5][:3, 2]
+            downness = -float(ax[2]) / (float(np.linalg.norm(ax)) or 1e-9)
+            in_lim = all(self.joint_limits[i][0] <= q[i - 1] <= self.joint_limits[i][1]
+                         for i in range(1, 7))
+            score = pos_err + (1.0 - downness) * 1000.0
+            if in_lim and (best is None or score < best[0]):
+                best = (score, q, downness, pos_err)
+
+        if best is None:
+            return None
+        _, q, downness, pos_err = best
+        if pos_err > pos_tol_mm or downness < 0.98:
+            return None
+        return q
+
+    def _solve_topdown_ik_ikpy(self, x, y, z, yaw_deg=None,
+                               current_angles=None, pos_tol_mm=2.0):
+        """Legacy top-down IK via ikpy/URDF (WRONG wrist for this unit — kept only
+        as a fallback when the calibrated model is missing). Constrains tool-X."""
+        if self.ik_chain is None:
+            return None
+        import numpy as np
+        if current_angles is None:
+            try:
+                seed_deg = self.get_all_joint_angles()
+            except RuntimeError:
+                seed_deg = [0.0, 0.0, -90.0, 0.0, 90.0, 0.0]
+        else:
+            seed_deg = list(current_angles)
+        try:
+            sol_full = self.ik_chain.inverse_kinematics(
+                target_position=np.array([x, y, z], dtype=float) / 1000.0,
+                target_orientation=np.array([0.0, 0.0, -1.0]),
+                orientation_mode="X",
+                initial_position=self._ikpy_full_vector(seed_deg),
+            )
+        except Exception:
+            return None
+        angles = [self._wrap_angle(math.degrees(sol_full[i]))
+                  for i in self.ik_active_idx]
+        fk_frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles))
+        fk_pos_mm = [float(v) * 1000.0 for v in fk_frame[:3, 3]]
+        pos_err = math.sqrt(sum((f - t) ** 2
+                                for f, t in zip(fk_pos_mm, (x, y, z))))
+        approach = fk_frame[:3, self._APPROACH_AXIS_COL]
+        downness = -float(approach[2]) / (float(np.linalg.norm(approach)) or 1e-9)
+        if pos_err > pos_tol_mm or downness < 0.98:
+            return None
+        return angles
+
+    def ikpy_fk(self, angles_deg: List[float]) -> List[float]:
+        """Forward kinematics via ikpy: 6 joint angles (deg) -> pose mm/deg.
+
+        Returns [x, y, z, rx, ry, rz]. Raises RuntimeError if the chain is
+        unavailable.
+        """
+        if self.ik_chain is None:
+            raise RuntimeError(f"IK chain unavailable: {self.ik_error}")
+        frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles_deg))
+        pos_mm = [float(v) * 1000.0 for v in frame[:3, 3]]
+        ori_deg = self._matrix_to_euler_xyz(frame[:3, :3])
+        return pos_mm + ori_deg
+
+    def send_coords(self, coords: List[float], speed: int = 30, mode: int = 0) -> None:
+        """Move the end-effector to an absolute Cartesian pose (non-blocking).
+
+        Self-IK path: the pose is converted to joint angles with ikpy and sent
+        via send_angles (joint move), because this unit's firmware Cartesian
+        move (firmware send_coords) drives off broken firmware IK and runs away.
+
+        Args:
+            coords: [x, y, z, rx, ry, rz] in mm / degrees.
+            speed: 1-100.
+            mode: accepted for API compatibility but IGNORED — motion is always
+                joint-interpolated (no firmware straight-line move available).
+
+        Raises ValueError if the pose is out of the workspace box, has no
+        reliable IK solution, or the IK solution violates a joint limit; the arm
+        does not move in any of those cases.
+        """
+        coords = list(coords)
+        # Wrap the orientation triple into [-180, 180) so a yaw computed slightly
+        # past the boundary (e.g. 180.5) is accepted instead of rejected.
+        if len(coords) == 6:
+            coords[3:] = [self._wrap_angle(a) for a in coords[3:]]
+        self._validate_coords(coords)
+        self._validate_speed(speed)
+
+        angles = self.solve_ik(coords)
+        if angles is None:
+            raise ValueError(
+                "No reliable IK solution for the target pose "
+                "(unreachable, or FK round-trip exceeded tolerance)"
+            )
+        for i, a in enumerate(angles, 1):
+            lo, hi = self.joint_limits[i]
+            if not (lo <= a <= hi):
+                raise ValueError(
+                    f"IK solution joint {i}={a:.1f} exceeds limit [{lo}, {hi}]"
+                )
+
+        # Record both targets so either wait path works; motion is joint-space.
+        self.last_target = list(angles)
+        self.last_coords_target = list(coords)
+        self.mc.send_angles(angles, speed)
+
+    def send_pose_matrix(self, xyz_mm: List[float], rot, speed: int = 30) -> None:
+        """Move to position + rotation MATRIX via self-IK -> send_angles.
+
+        Gimbal-safe counterpart of send_coords for top-down / straight-down
+        grasps where the rpy Euler representation would lose yaw. Validates the
+        workspace box and joint limits; raises ValueError (no motion) if the pose
+        is out of range, has no reliable IK solution, or violates a joint limit.
+        """
+        xyz_mm = [float(v) for v in xyz_mm]
+        self._validate_speed(speed)
+        # Validate position against the box (orientation is a valid matrix).
+        for value, lo, hi, label in zip(xyz_mm, self.coords_min[:3],
+                                        self.coords_max[:3], self._COORD_LABELS[:3]):
+            if not (lo <= value <= hi):
+                raise ValueError(
+                    f"Coord {label}={value} out of workspace range [{lo}, {hi}]"
+                )
+
+        angles = self.solve_ik_matrix(xyz_mm, rot)
+        if angles is None:
+            raise ValueError(
+                "No reliable IK solution for the target pose "
+                "(unreachable, or FK round-trip exceeded tolerance)"
+            )
+        for i, a in enumerate(angles, 1):
+            lo, hi = self.joint_limits[i]
+            if not (lo <= a <= hi):
+                raise ValueError(
+                    f"IK solution joint {i}={a:.1f} exceeds limit [{lo}, {hi}]"
+                )
+
+        self.last_target = list(angles)
+        # Record an rpy form too (best-effort) so the joint wait path works.
+        self.last_coords_target = xyz_mm + self._matrix_to_euler_xyz(rot)
+        self.mc.send_angles(angles, speed)
+
+    def solve_ik(self, target_coords: List[float],
+                 current_angles: Optional[List[float]] = None,
+                 pos_tol_mm: float = 2.0,
+                 ori_tol_deg: float = 2.0) -> Optional[List[float]]:
+        """Return a 6-joint IK solution (degrees) for an rpy pose, or None.
+
+        Thin wrapper over solve_ik_matrix: builds the target rotation matrix from
+        the [rx,ry,rz] Euler triple. For straight-down (gimbal) orientations the
+        Euler triple is degenerate (loses yaw), so callers that need exact yaw
+        (e.g. top-down grasps) should use solve_ik_matrix with a rotation matrix.
+        """
+        if len(target_coords) != 6:
+            raise ValueError("target_coords must have 6 elements")
+        target = list(target_coords)
+        target[3:] = [self._wrap_angle(a) for a in target[3:]]
+        rot = self._euler_xyz_to_matrix(target[3], target[4], target[5])
+        return self.solve_ik_matrix(target[:3], rot, current_angles,
+                                    pos_tol_mm, ori_tol_deg)
+
+    def solve_ik_matrix(self, xyz_mm: List[float], rot,
+                        current_angles: Optional[List[float]] = None,
+                        pos_tol_mm: float = 2.0,
+                        ori_tol_deg: float = 2.0) -> Optional[List[float]]:
+        """Return a 6-joint IK solution (degrees) for position + rotation MATRIX.
+
+        Computes IK with ikpy (position + full orientation), seeded from the
+        current joint angles, then VERIFIES the solution with an ikpy FK
+        round-trip done in ROTATION-MATRIX space (not Euler), so it is correct
+        even at gimbal-boundary orientations like straight-down. If the FK pose
+        differs from the request by more than pos_tol_mm / ori_tol_deg the
+        solution is rejected (returns None). This round-trip gate is what makes
+        self-IK safe to drive the arm with.
+
+        Args:
+            xyz_mm: target position [x, y, z] in mm.
+            rot: 3x3 target rotation matrix (base<-tool), e.g. top_down_rotation().
+
+        Returns None when the chain is unavailable or no reliable solution exists.
+        """
+        if self.ik_chain is None:
+            return None
+
+        import numpy as np
+        rot = np.asarray(rot, dtype=float)
+        pos_m = np.array(xyz_mm, dtype=float) / 1000.0
+
+        if current_angles is None:
+            try:
+                seed_deg = self.get_all_joint_angles()
+            except RuntimeError:
+                seed_deg = [0.0] * 6
+        else:
+            seed_deg = list(current_angles)
+        seed_full = self._ikpy_full_vector(seed_deg)
+
+        try:
+            sol_full = self.ik_chain.inverse_kinematics(
+                target_position=pos_m,
+                target_orientation=rot,
+                orientation_mode="all",
+                initial_position=seed_full,
+            )
+        except Exception:
+            return None
+
+        angles = [self._wrap_angle(math.degrees(sol_full[i]))
+                  for i in self.ik_active_idx]
+
+        # Round-trip verification (the safety gate), in matrix space so it holds
+        # at gimbal orientations. Position from FK; orientation by comparing the
+        # achieved rotation matrix against the requested one.
+        fk_frame = self.ik_chain.forward_kinematics(self._ikpy_full_vector(angles))
+        fk_pos_mm = [float(v) * 1000.0 for v in fk_frame[:3, 3]]
+        pos_err = math.sqrt(sum((f - t) ** 2 for f, t in zip(fk_pos_mm, xyz_mm)))
+        ori_err = self._rotation_angle_error(fk_frame[:3, :3], rot)
+        if pos_err > pos_tol_mm or ori_err > ori_tol_deg:
+            return None
+        return angles
+
+    @staticmethod
+    def _rotation_angle_error(R_a, R_b) -> float:
+        """Geodesic angle (degrees) between two rotation matrices.
+
+        theta = arccos((trace(R_aᵀ R_b) - 1) / 2). Frame-independent, so it is a
+        correct orientation error even at gimbal-boundary poses (unlike per-axis
+        Euler comparison).
+        """
+        import numpy as np
+        R_a = np.asarray(R_a, dtype=float)
+        R_b = np.asarray(R_b, dtype=float)
+        m = R_a.T @ R_b
+        cos_theta = (np.trace(m) - 1.0) / 2.0
+        cos_theta = max(-1.0, min(1.0, float(cos_theta)))
+        return math.degrees(math.acos(cos_theta))
+
+    def detect_near_limits(self, margin: float = 3.0,
+                           angles: Optional[List[float]] = None) -> List[dict]:
+        """Report joints sitting within `margin` degrees of a limit.
+
+        Surfaces the "deadlock" state observed when a bad Cartesian command
+        drove a joint into its hard stop: callable from /robot/status even when
+        the arm is idle. Returns a list of
+        {joint, angle, limit:[lo,hi], side:"lower"|"upper"} for each near joint.
+        """
+        if angles is None:
+            try:
+                angles = self.get_all_joint_angles()
+            except RuntimeError:
+                return []
+        near = []
+        for i, a in enumerate(angles, 1):
+            lo, hi = self.joint_limits[i]
+            if a <= lo + margin:
+                near.append({"joint": i, "angle": round(a, 2),
+                             "limit": [lo, hi], "side": "lower"})
+            elif a >= hi - margin:
+                near.append({"joint": i, "angle": round(a, 2),
+                             "limit": [lo, hi], "side": "upper"})
+        return near
+
+    def check_pose_reachable(self, coords: List[float]
+                             ) -> Tuple[bool, str, Optional[List[float]]]:
+        """Decide, WITHOUT moving, whether a Cartesian pose is reachable.
+
+        Uses self-computed ikpy IK with an FK round-trip check (firmware IK is
+        broken), so this is now an authoritative pre-move verdict, not a guess.
+
+        Returns (reachable, reason, ik_angles):
+          - (False, "out_of_range",  None)     outside the workspace box,
+          - (False, "ik_failed",     None)     no reliable IK solution (unreachable
+                                               or FK round-trip out of tolerance),
+          - (False, "joint_limit",   [angles]) IK solved but a joint exceeds its limit,
+          - (True,  "ok",            [angles]) IK solved and within joint limits,
+          - (True,  "ok_unverified", None)     IK chain unavailable (ikpy/URDF
+                                               missing) -> cannot verify; the box
+                                               check passed.
+        """
+        coords = list(coords)
+        if len(coords) == 6:
+            coords[3:] = [self._wrap_angle(a) for a in coords[3:]]
+        try:
+            self._validate_coords(coords)
+        except ValueError:
+            return False, "out_of_range", None
+        if self.ik_chain is None:
+            return True, "ok_unverified", None
+        ik = self.solve_ik(coords)
+        if ik is None:
+            return False, "ik_failed", None
+        for i, angle in enumerate(ik, 1):
+            lo, hi = self.joint_limits[i]
+            if not (lo <= angle <= hi):
+                return False, "joint_limit", ik
+        return True, "ok", ik
+
+    def wait_for_coords_completion(self, target_coords: Optional[List[float]] = None,
+                                   pos_tol: float = 3.0, ori_tol: float = 3.0,
+                                   timeout: float = 20.0, poll: float = 0.15,
+                                   stall_window: float = 2.5,
+                                   stall_min_progress: float = 1.0,
+                                   stall_min_ori_progress: float = 0.5) -> dict:
+        """Wait until the end-effector reaches target_coords (mm / deg).
+
+        Mirrors wait_for_completion but in Cartesian space. Terminal conditions:
+          1. converged      - position within pos_tol (mm) AND orientation within
+                              ori_tol (deg) -> success, no stop
+          2. ik_no_solution - firmware error 32/33/34 observed -> stop, failure
+          3. stalled        - net progress (position mm AND orientation deg)
+                              below threshold while not converged -> stop, failure
+          4. timeout        - exceeded timeout while not converged -> stop, failure
+          5. no_target      - no target known and none was ever commanded
+
+        Returns dict: completed, reason, elapsed, pos_error, ori_error.
+
+        Caveat: orientation error is a per-axis Euler comparison, not a true
+        SO(3) metric; near gimbal singularities (rx ≈ ±90, which the 280's home
+        pose sits at) it can overstate the error and delay convergence. Adequate
+        for v1 top-down grasps; revisit with quaternions if needed.
+        """
+        if target_coords is None:
+            target_coords = self.last_coords_target
+
+        start = time.monotonic()
+
+        # No known target: we cannot judge Cartesian convergence, so report it
+        # honestly rather than polling the unreliable is_moving() flag (which can
+        # stick at True and waste the whole timeout before a spurious stop).
+        if target_coords is None:
+            return {"completed": False, "reason": "no_target",
+                    "elapsed": time.monotonic() - start,
+                    "pos_error": None, "ori_error": None}
+
+        history = deque()  # (timestamp, [x, y, z])
+        last_err_check = 0.0
+        while True:
+            now = time.monotonic()
+            cur = self._read_coords(retries=2)
+            if cur is None:
+                # Transient read failure; retry until timeout.
+                if now - start > timeout:
+                    self._force_stop()
+                    return {"completed": False, "reason": "timeout",
+                            "elapsed": now - start,
+                            "pos_error": None, "ori_error": None}
+                time.sleep(poll)
+                continue
+
+            pos_error = max(abs(c - t) for c, t in zip(cur[:3], target_coords[:3]))
+            ori_error = max(self._angle_delta(c, t)
+                            for c, t in zip(cur[3:], target_coords[3:]))
+
+            # 1) converged -> success (already stopped, no stop needed)
+            if pos_error <= pos_tol and ori_error <= ori_tol:
+                return {"completed": True, "reason": "converged",
+                        "elapsed": now - start,
+                        "pos_error": pos_error, "ori_error": ori_error}
+
+            # 2) firmware fault -> stop early (throttled poll). 32/33/34 are
+            #    IK / linear-motion no-solution; 1-6 (joint limit) and 16-19
+            #    (collision) are surfaced as a generic robot_fault so the caller
+            #    is warned to inspect the arm instead of seeing a bare timeout.
+            if now - last_err_check > 1.0:
+                last_err_check = now
+                code, _ = self.describe_error()
+                if code in (32, 33, 34):
+                    self._force_stop()
+                    return {"completed": False, "reason": "ik_no_solution",
+                            "elapsed": now - start,
+                            "pos_error": pos_error, "ori_error": ori_error}
+                if code:
+                    self._force_stop()
+                    return {"completed": False, "reason": "robot_fault",
+                            "elapsed": now - start,
+                            "pos_error": pos_error, "ori_error": ori_error}
+
+            # 3) stall detection: net progress over the recent window in BOTH
+            #    position (mm) and orientation (deg). Both must be below their
+            #    thresholds to count as stalled, so a pure-reorientation move
+            #    (XYZ ~constant) is not falsely flagged.
+            history.append((now, list(cur)))
+            while history and now - history[0][0] > stall_window:
+                history.popleft()
+            if now - start > stall_window and len(history) >= 2:
+                ref = history[0][1]
+                pos_progress = max(abs(c - h) for c, h in zip(cur[:3], ref[:3]))
+                ori_progress = max(self._angle_delta(c, h)
+                                   for c, h in zip(cur[3:], ref[3:]))
+                if pos_progress < stall_min_progress and ori_progress < stall_min_ori_progress:
+                    self._force_stop()
+                    return {"completed": False, "reason": "stalled",
+                            "elapsed": now - start,
+                            "pos_error": pos_error, "ori_error": ori_error}
+
+            # 4) timeout -> cancel
+            if now - start > timeout:
+                self._force_stop()
+                return {"completed": False, "reason": "timeout",
+                        "elapsed": now - start,
+                        "pos_error": pos_error, "ori_error": ori_error}
 
             time.sleep(poll)
 
