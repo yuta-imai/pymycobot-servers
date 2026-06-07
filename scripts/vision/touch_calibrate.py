@@ -127,8 +127,12 @@ def collect(args):
 
     _, board = build_board()
     corners = chessboard_corners_mm(board)
-    ids = recommend_touch_corner_ids(corners, args.n)
-    print(f"[touch] will touch {len(ids)} corners (ids={ids})")
+    if args.corner_ids:
+        ids = [int(x) for x in args.corner_ids.split(",")]
+    else:
+        ids = recommend_touch_corner_ids(corners, args.n)
+    print(f"[touch] will touch {len(ids)} corners in this order (ids={ids})")
+    print("[touch] follow the numbered annotated reference image for each point")
 
     ctrl = MyCobotJointController(port=args.port, baudrate=args.baudrate)
     if ctrl._cm_dh is None:
@@ -197,6 +201,10 @@ def main():
     mode.add_argument("--collect", action="store_true",
                       help="live touch calibration on the robot host")
     ap.add_argument("--n", type=int, default=6, help="number of touch points")
+    ap.add_argument("--corner-ids", default=None,
+                    help="explicit comma-separated ChArUco corner ids to touch, "
+                         "in order (matches a numbered reference image); "
+                         "overrides --n/auto-pick")
     ap.add_argument("--scale", action="store_true",
                     help="estimate a similarity scale (safety net for an "
                          "unmeasured square_length_mm); default rigid (scale=1)")
