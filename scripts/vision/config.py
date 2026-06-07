@@ -21,26 +21,27 @@ ROOT = os.path.dirname(os.path.dirname(HERE))            # project root
 ARTIFACT_DIR = os.path.join(HERE, "calib")              # calibration outputs live here
 
 # --- artifact file names (under ARTIFACT_DIR) -------------------------------
-INTRINSICS_JSON = "intrinsics.json"      # K, dist, model, image_size  (step 2a)
-EXTRINSICS_JSON = "extrinsics.json"      # R_cb, t_cb, board plane in cam (step 2b)
-HANDEYE_JSON = "board_to_base.json"      # board->base rigid transform   (step 2c)
+HOMOGRAPHY_JSON = "homography.json"      # pixel<->board-plane homography (step A)
+HANDEYE_JSON = "board_to_base.json"      # board->base (similarity) transform (step B)
 
 
-# --- ChArUco board (A3) -----------------------------------------------------
-# A3 sheet = 297 x 420 mm. We leave a margin and tile an 8 x 11 grid of 35 mm
-# squares (8*35=280 mm, 11*35=385 mm) so the printed pattern fits A3 with room
-# for a border. The aruco markers sit inside the white squares at 26 mm.
+# --- ChArUco board (A4) -----------------------------------------------------
+# IDENTIFIED FROM THE PHYSICAL BOARD (2026-06-07, eye-to-hand SORACAM frame):
+# the printed board is a 10 x 7 ChArUco using DICT_6X6_250 (35 markers, ids
+# 0-34). Detection lands cleanly on the chessboard intersections. The markers
+# have a wide white border -> measured marker/square ratio ~ 0.46.
 #
-# IMPORTANT: print at 100% scale (no "fit to page") and MEASURE one square with
-# calipers after printing; put the measured value in SQUARE_LENGTH_MM. A 1.5%
-# printer scale error maps almost 1:1 into a metric pick error.
+# IMPORTANT: square_length_mm MUST be the TRUE printed size (it sets the metric
+# scale of every pick coordinate). MEASURE one square with a ruler/calipers and
+# set it here. marker_length_mm only affects detection robustness (the pose
+# comes from the chessboard corners), so the 0.46 ratio is fine for it.
 @dataclass(frozen=True)
 class BoardSpec:
-    squares_x: int = 8                       # columns
-    squares_y: int = 11                      # rows
-    square_length_mm: float = 35.0           # checker square edge (MEASURE after print)
-    marker_length_mm: float = 26.0           # aruco marker edge inside a square
-    dictionary: str = "DICT_5X5_1000"        # cv2.aruco predefined dict name
+    squares_x: int = 10                      # columns
+    squares_y: int = 7                       # rows
+    square_length_mm: float = 28.0           # TODO: set to the MEASURED square edge
+    marker_length_mm: float = 13.0           # ~0.46 * square (detection only)
+    dictionary: str = "DICT_6X6_250"         # cv2.aruco predefined dict name
     # The board frame: origin at the board corner, +X along squares_x, +Y along
     # squares_y, +Z out of the board toward the camera. OpenCV's CharucoBoard
     # uses exactly this convention, with chessboard corners at integer multiples

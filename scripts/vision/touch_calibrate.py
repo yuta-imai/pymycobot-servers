@@ -29,7 +29,8 @@ from typing import List
 import numpy as np
 
 import config
-from geometry import kabsch, rigid_fit_residuals, transform_points, make_transform
+from geometry import (kabsch, umeyama, rigid_fit_residuals, transform_points,
+                      make_transform)
 
 
 # --------------------------------------------------------------------------- #
@@ -158,19 +159,24 @@ def collect(args):
 
     src = np.array(src_board, float)
     dst = np.array(dst_base, float)
-    T = kabsch(src, dst)
+    T, scale = umeyama(src, dst, with_scale=args.scale)
     rms, mx, per = rigid_fit_residuals(T, src, dst)
-    print(f"\n[fit] board->base RMS={rms:.2f} mm  max={mx:.2f} mm")
+    print(f"\n[fit] board->base RMS={rms:.2f} mm  max={mx:.2f} mm  "
+          f"scale={scale:.4f}{'  (estimated)' if args.scale else '  (fixed=1)'}")
     for cid, e in zip(ids, per):
         print(f"   corner {cid}: residual {e:.2f} mm")
+    if args.scale and abs(scale - 1.0) > 0.03:
+        print(f"NOTE: scale {scale:.3f} differs from 1 by >3% — your "
+              "square_length_mm is likely off; measure and set config.BOARD.")
     if rms > 3.0:
         print("WARN: RMS > 3 mm — re-touch the worst corners or add points.")
 
     config.ensure_artifact_dir()
     out = config.artifact_path(config.HANDEYE_JSON)
     with open(out, "w") as f:
-        json.dump({"T_base_board": T.tolist(), "rms_mm": rms, "max_mm": mx,
-                   "corner_ids": ids,
+        json.dump({"T_base_board": T.tolist(), "scale": scale,
+                   "scale_estimated": bool(args.scale),
+                   "rms_mm": rms, "max_mm": mx, "corner_ids": ids,
                    "src_board_mm": src.tolist(),
                    "dst_base_mm": dst.tolist()}, f, indent=2)
     print(f"wrote {out}")
@@ -191,6 +197,9 @@ def main():
     mode.add_argument("--collect", action="store_true",
                       help="live touch calibration on the robot host")
     ap.add_argument("--n", type=int, default=6, help="number of touch points")
+    ap.add_argument("--scale", action="store_true",
+                    help="estimate a similarity scale (safety net for an "
+                         "unmeasured square_length_mm); default rigid (scale=1)")
     ap.add_argument("--noise-mm", type=float, default=1.0, help="(simulate) touch noise")
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--baudrate", type=int, default=115200)
