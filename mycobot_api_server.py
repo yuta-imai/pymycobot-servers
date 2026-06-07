@@ -7,8 +7,10 @@ Implements the OpenAPI specification defined in mycobot_api_spec.yaml.
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import List, Optional
+from pathlib import Path
 import uvicorn
 import argparse
 from datetime import datetime
@@ -231,6 +233,15 @@ app.add_middleware(
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Serve the 3D pose visualizer (static three.js app) same-origin at /ui.
+# Self-contained: it fetches live state via the REST API above (HTTP GET).
+_WEBUI_DIR = Path(__file__).resolve().parent / "webui"
+if _WEBUI_DIR.is_dir():
+    app.mount("/ui", StaticFiles(directory=str(_WEBUI_DIR), html=True), name="ui")
+    logger.info(f"Pose visualizer UI mounted at /ui (from {_WEBUI_DIR})")
+else:
+    logger.warning(f"webui dir not found at {_WEBUI_DIR}; /ui not mounted")
 
 
 def get_current_timestamp() -> str:
