@@ -21,7 +21,19 @@ python touch_calibrate.py --simulate          # タッチ点数 vs 誤差
 ## 1. 物理セットアップ
 アームとボードを固定（カメラは真上寄り推奨）。A4 ChArUco を作業位置に常設。
 **1マスを実測** → `config.py` の `BOARD.square_length_mm` を実測値に更新。
-（自分で生成し直す場合は `python charuco_board.py` だが、既存の 10×7/6x6_250 ボードならそのまま。）
+
+ボードを印刷する場合は **真スケール PDF** を生成（A4・mm 埋め込み・50mm検証バー付き）：
+```bash
+# 既定(config.BOARD)で出力
+python board_to_pdf.py --out charuco_A4.pdf
+# 検出に強い版（粗い辞書＋大きいマーカー; 遠め/低解像でも全面検出しやすい）
+python board_to_pdf.py --dict DICT_4X4_50 --squares 10x7 --square-mm 28 --marker-mm 22 \
+    --out charuco_4x4_A4.pdf
+```
+**100% スケールで印刷**（fit to page にしない）→ 50mm バーを定規で確認 → `config.BOARD`
+を印刷した board に合わせる（dict / squares / square_length_mm / marker_length_mm）。
+注: 既存の 6×6_250 ボードは ~46px のマーカーが小さく、この距離だと約半分しかデコード
+できず**ボードの約4割しか検出できない**。全面で使うなら 4×4 版の再印刷を推奨。
 
 ## 2. キャリブレーション（1 回）
 
