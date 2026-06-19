@@ -138,22 +138,43 @@ def collect(args):
     if ctrl._cm_dh is None:
         raise SystemExit(f"corrected model unavailable: {ctrl._cm_error}")
 
-    src_board, dst_base = [], []
+    # Close the gripper so the contact point is the defined, repeatable closed
+    # fingertip. KEEP THE GRIPPER VERTICAL (pointing straight down) at every
+    # touch: a constant approach orientation makes the (frame6 -> fingertip)
+    # offset a constant vector that the board->base fit absorbs. Varying the
+    # orientation scatters the points (that was the 21mm-RMS failure mode).
+    try:
+        ctrl.close_gripper(speed=50, gripper_type=3)
+        import time as _t; _t.sleep(1.0)
+        print("[touch] gripper closed (parallel, type=3)")
+    except Exception as exc:
+        print(f"[touch] WARN: close_gripper failed ({exc}); close it by hand")
+
+    src_board, dst_base, used_ids = [], [], []
     try:
         for k, cid in enumerate(ids):
             bx, by, _ = corners[cid]
             print(f"\n[{k+1}/{len(ids)}] corner id={cid}  board=({bx:.1f},{by:.1f}) mm")
-            print("  releasing servos — hand-guide the TIP onto that printed "
-                  "corner, hold steady, then press Enter (q=abort)...")
+            print("  releasing servos — hold the gripper VERTICAL (straight down) "
+                  "and put the closed fingertip on that corner; hold steady.")
+            print("  press Enter to sample  /  s=skip (unreachable)  /  q=abort")
             ctrl.mc.release_all_servos()
-            if input("  > ").strip().lower() == "q":
+            ans = input("  > ").strip().lower()
+            if ans == "q":
                 raise KeyboardInterrupt
+            if ans == "s":
+                print("    skipped")
+                continue
             angles = ctrl.get_all_joint_angles()
             tip = ctrl.corrected_fk(angles)[:3]
+            downness = -ctrl.corrected_approach_axis(angles)[2]
+            flag = "" if downness >= 0.9 else "  <-- NOT vertical! re-do more upright"
             print(f"    angles={['%.1f' % a for a in angles]}")
-            print(f"    tip(base)={[round(v,1) for v in tip]} mm")
+            print(f"    tip(base)={[round(v,1) for v in tip]} mm  "
+                  f"downness={downness:+.2f}{flag}")
             src_board.append([bx, by, 0.0])
             dst_base.append(tip)
+            used_ids.append(cid)
     finally:
         try:
             ctrl.mc.power_on()
@@ -161,13 +182,19 @@ def collect(args):
             pass
         ctrl.disconnect() if hasattr(ctrl, "disconnect") else None
 
+    if len(src_board) < 3:
+        raise SystemExit(f"need >= 3 sampled points, got {len(src_board)}")
     src = np.array(src_board, float)
     dst = np.array(dst_base, float)
     T, scale = umeyama(src, dst, with_scale=args.scale)
     rms, mx, per = rigid_fit_residuals(T, src, dst)
+    # planarity check: touches on a flat board should be near-coplanar in base
+    z_spread = float(dst[:, 2].max() - dst[:, 2].min())
     print(f"\n[fit] board->base RMS={rms:.2f} mm  max={mx:.2f} mm  "
           f"scale={scale:.4f}{'  (estimated)' if args.scale else '  (fixed=1)'}")
-    for cid, e in zip(ids, per):
+    print(f"      base-Z spread of touches = {z_spread:.1f} mm "
+          f"(should be small; large => inconsistent gripper orientation)")
+    for cid, e in zip(used_ids, per):
         print(f"   corner {cid}: residual {e:.2f} mm")
     if args.scale and abs(scale - 1.0) > 0.03:
         print(f"NOTE: scale {scale:.3f} differs from 1 by >3% — your "
@@ -180,7 +207,8 @@ def collect(args):
     with open(out, "w") as f:
         json.dump({"T_base_board": T.tolist(), "scale": scale,
                    "scale_estimated": bool(args.scale),
-                   "rms_mm": rms, "max_mm": mx, "corner_ids": ids,
+                   "rms_mm": rms, "max_mm": mx, "z_spread_mm": z_spread,
+                   "corner_ids": used_ids,
                    "src_board_mm": src.tolist(),
                    "dst_base_mm": dst.tolist()}, f, indent=2)
     print(f"wrote {out}")
