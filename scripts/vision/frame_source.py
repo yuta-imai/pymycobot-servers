@@ -71,10 +71,72 @@ def grab_rtsp(url: str, *, warmup: int = 5, timeout_s: float = 10.0) -> np.ndarr
         cap.release()
 
 
+_COVERAGE_BASE = {"jp": "https://api.soracom.io", "g": "https://g.api.soracom.io"}
+
+
+def grab_soracom_still(*, device_id: str = "", auth_key_id: str = "",
+                       auth_key: str = "", coverage: str = "",
+                       retries: int = 8, retry_wait_s: float = 3.0) -> np.ndarray:
+    """Grab a live still straight from the SORACOM API (stdlib HTTP, no MCP).
+
+    auth -> request a still_picture URL -> download the JPEG. Credentials come
+    from args or env (SORACOM_AUTH_KEY_ID / SORACOM_AUTH_KEY / SORACOM_DEVICE_ID
+    / SORACOM_COVERAGE). The still takes ~15 s to prepare, so the image URL is
+    polled with retries. This lets the setup routine grab frames on the robot
+    host without the agent/MCP in the loop.
+    """
+    import json
+    import time
+    import urllib.request
+    import urllib.error
+
+    device_id = device_id or os.environ.get("SORACOM_DEVICE_ID", "")
+    auth_key_id = auth_key_id or os.environ.get("SORACOM_AUTH_KEY_ID", "")
+    auth_key = auth_key or os.environ.get("SORACOM_AUTH_KEY", "")
+    coverage = coverage or os.environ.get("SORACOM_COVERAGE", "jp")
+    base = _COVERAGE_BASE.get(coverage)
+    if not (device_id and auth_key_id and auth_key and base):
+        raise RuntimeError("soracom backend needs SORACOM_AUTH_KEY_ID, "
+                           "SORACOM_AUTH_KEY, SORACOM_DEVICE_ID (coverage jp/g)")
+
+    def _post(path, body, headers=None):
+        req = urllib.request.Request(
+            base + path, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", **(headers or {})},
+            method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    def _get(path, headers=None):
+        req = urllib.request.Request(base + path, headers=headers or {},
+                                     method="GET")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+
+    auth = _post("/v1/auth", {"authKeyId": auth_key_id, "authKey": auth_key,
+                              "tokenTimeoutSeconds": 3600})
+    hdr = {"X-Soracom-API-Key": auth["apiKey"], "X-Soracom-Token": auth["token"]}
+    meta = _get(f"/v1/sora_cam/devices/{device_id}/atom_cam/still_picture", hdr)
+    img_url = meta["url"]
+    last = None
+    for _ in range(retries):
+        try:
+            with urllib.request.urlopen(img_url, timeout=30) as r:
+                buf = r.read()
+            if buf:
+                return _decode_jpeg(buf)
+        except urllib.error.HTTPError as e:      # not ready yet -> wait
+            last = e
+        time.sleep(retry_wait_s)
+    raise RuntimeError(f"still image not ready after {retries} tries ({last})")
+
+
 def grab(*, backend: Optional[str] = None, url: Optional[str] = None,
          mcp_json: Optional[str] = None) -> np.ndarray:
     """Grab a single BGR frame from the configured (or overridden) backend."""
     backend = backend or FRAME_SOURCE.backend
+    if backend == "soracom":
+        return grab_soracom_still(device_id=FRAME_SOURCE.device_id)
     if backend == "rtsp":
         url = url or FRAME_SOURCE.stream_url
         if not url:
@@ -125,7 +187,7 @@ def capture_burst(out_dir: str, *, url: str, count: int, interval_s: float,
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--backend", default=None, choices=[None, "rtsp", "mcp"])
+    ap.add_argument("--backend", default=None, choices=[None, "soracom", "rtsp", "mcp"])
     ap.add_argument("--url", default=None)
     ap.add_argument("--mcp-json", default=None)
     ap.add_argument("--burst", type=int, default=0,
