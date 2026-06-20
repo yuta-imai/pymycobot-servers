@@ -461,7 +461,27 @@ class MyCobotJointController:
     def stop_all_joints(self) -> None:
         """Stop movement of all joints."""
         self._force_stop()
-    
+
+    def release_all_servos(self) -> None:
+        """Relax the WHOLE arm: cut torque on all joint servos (free/hand-guide).
+
+        After this the arm is limp and will sag under gravity — support it. Use
+        power_on() to re-engage. Useful for freedrive calibration/teaching.
+        """
+        releaser = getattr(self.mc, "release_all_servos", None)
+        if releaser is None:
+            raise NotImplementedError(
+                "release_all_servos is not available in this pymycobot/firmware")
+        releaser()
+
+    def power_on(self) -> None:
+        """Re-engage (power on) all joint servos after a release_all_servos()."""
+        powerer = getattr(self.mc, "power_on", None)
+        if powerer is None:
+            raise NotImplementedError(
+                "power_on is not available in this pymycobot/firmware")
+        powerer()
+
     def compute_is_moving(self, current_angles: Optional[List[float]] = None,
                           eps: float = 0.5) -> bool:
         """Decide whether the robot is moving by comparing successive samples.

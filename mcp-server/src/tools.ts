@@ -218,6 +218,28 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
   );
 
   server.registerTool(
+    "release_all_servos",
+    {
+      title: "Relax whole arm",
+      description:
+        "Cut torque on every joint servo so the WHOLE arm can be moved by hand (freedrive/teaching). WARNING: the arm goes limp and sags under gravity — make sure it is supported first. Re-engage with power_on.",
+      inputSchema: {},
+    },
+    () => run(() => client.releaseAllServos()),
+  );
+
+  server.registerTool(
+    "power_on",
+    {
+      title: "Power on servos",
+      description:
+        "Re-engage (power on) all joint servos after release_all_servos, so the arm holds position and can move under command again.",
+      inputSchema: {},
+    },
+    () => run(() => client.powerOn()),
+  );
+
+  server.registerTool(
     "wait_for_movement",
     {
       title: "Wait for movement to complete",

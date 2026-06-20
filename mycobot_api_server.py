@@ -652,6 +652,49 @@ async def stop_all_joints():
         )
 
 
+@app.post("/robot/release", response_model=SuccessResponse, tags=["robot"])
+async def release_all_servos():
+    """Relax the WHOLE arm: cut torque on every joint servo so it can be moved by
+    hand (freedrive). The arm goes limp and sags under gravity — support it
+    before calling. Re-engage with POST /robot/power_on."""
+    ensure_controller()
+    try:
+        controller.release_all_servos()
+        return SuccessResponse(
+            success=True,
+            message="All servos released (arm is limp; support it). "
+                    "Use /robot/power_on to re-engage.",
+            timestamp=get_current_timestamp()
+        )
+    except NotImplementedError as e:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to release servos: {str(e)}"
+        )
+
+
+@app.post("/robot/power_on", response_model=SuccessResponse, tags=["robot"])
+async def power_on():
+    """Re-engage (power on) all joint servos after /robot/release."""
+    ensure_controller()
+    try:
+        controller.power_on()
+        return SuccessResponse(
+            success=True,
+            message="All servos powered on",
+            timestamp=get_current_timestamp()
+        )
+    except NotImplementedError as e:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to power on servos: {str(e)}"
+        )
+
+
 @app.get("/robot/status", response_model=RobotStatusResponse, tags=["robot"])
 async def get_robot_status(include_error: bool = False):
     """Get current robot status including joint angles and movement state.
