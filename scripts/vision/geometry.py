@@ -113,22 +113,48 @@ def rigid_fit_residuals(T: np.ndarray, src: np.ndarray, dst: np.ndarray
 
 
 # --------------------------------------------------------------------------- #
+# board -> base as homography (x,y) + plane (z)
+# --------------------------------------------------------------------------- #
+# The arm's corrected_fk position is not metric-accurate (this unit's absolute
+# position is uncalibrated), so a RIGID board->base does not fit (RMS ~20mm on
+# hardware). Empirically the corrected_fk-space is ~projective over the board, so
+# board(X,Y) -> base(x,y) is fit as a 2D HOMOGRAPHY and base_z as a tilted PLANE.
+# Because solve_topdown_ik targets that SAME corrected_fk space, feeding it these
+# (x,y,z) drives the PHYSICAL tip onto the board point despite the FK distortion.
+def fit_plane(xy: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """Least-squares plane z = a*X + b*Y + c. Returns (a,b,c)."""
+    xy = np.asarray(xy, float)
+    A = np.column_stack([xy, np.ones(len(xy))])
+    coef, *_ = np.linalg.lstsq(A, np.asarray(z, float), rcond=None)
+    return coef
+
+
+def apply_plane(plane: np.ndarray, xy: np.ndarray) -> np.ndarray:
+    """Evaluate z = a*X + b*Y + c at (N,2) xy (or one (2,))."""
+    xy = np.asarray(xy, float)
+    single = xy.ndim == 1
+    P = np.atleast_2d(xy)
+    z = P @ np.asarray(plane[:2], float) + plane[2]
+    return float(z[0]) if single else z
+
+
+# --------------------------------------------------------------------------- #
 # Full chain: board-plane pixel -> base-frame grasp point
 # --------------------------------------------------------------------------- #
 def base_grasp_point(pixel: np.ndarray, H_img2board: np.ndarray,
-                     T_base_board: np.ndarray, grasp_z_offset_mm: float
-                     ) -> Tuple[np.ndarray, np.ndarray]:
+                     H_board2base: np.ndarray, z_plane: np.ndarray,
+                     grasp_z_offset_mm: float) -> Tuple[np.ndarray, np.ndarray]:
     """Object board-contact pixel -> (footprint_base_xyz, grasp_base_xyz).
 
-    pixel -> board (X,Y) via the homography -> base via board->base; grasp lifts
-    the footprint by grasp_z_offset_mm along base +Z (world up) for a top-down
-    grasp. footprint base Z comes from the board plane embedded in T_base_board.
+    pixel -> board (X,Y) via H_img2board -> base (x,y) via H_board2base, base z
+    via the fitted plane. grasp lifts the footprint by grasp_z_offset_mm in
+    corrected_fk-space z (which solve_topdown_ik targets).
     """
     bxy = apply_homography(H_img2board, np.asarray(pixel, float).reshape(1, 2))[0]
-    P_board = np.array([bxy[0], bxy[1], 0.0])
-    foot = transform_points(T_base_board, P_board)
-    grasp = foot.copy()
-    grasp[2] += grasp_z_offset_mm
+    base_xy = apply_homography(H_board2base, bxy.reshape(1, 2))[0]
+    base_z = apply_plane(z_plane, bxy)
+    foot = np.array([base_xy[0], base_xy[1], base_z])
+    grasp = np.array([base_xy[0], base_xy[1], base_z + grasp_z_offset_mm])
     return foot, grasp
 
 
@@ -174,13 +200,23 @@ def _selftest():
     assert np.allclose(rec, board_pts, atol=1e-8)
     print("[homography] image<->board round-trip OK")
 
-    # 4) Full chain: a board-contact pixel -> base grasp point.
-    T_base_board = make_transform(_rot_xyz(0.01, -0.02, 0.7),
-                                  np.array([200., 0., -50.]))
+    # 4) plane fit/eval round-trip
+    xy = rng.uniform(0, 250, size=(8, 2))
+    plane_true = np.array([0.05, -0.03, 90.0])
+    z = apply_plane(plane_true, xy)
+    assert np.allclose(fit_plane(xy, z), plane_true, atol=1e-9)
+    print("[plane] fit/eval round-trip OK")
+
+    # 5) Full chain: pixel -> board -> base(homography xy) + plane z.
+    H_board2base = np.array([[0.5, 0.02, 60.], [-0.03, 0.55, -120.],
+                             [2e-5, 1e-5, 1.0]])
+    z_plane = np.array([0.04, -0.02, 95.0])
     pix = apply_homography(H_b2i, np.array([[140., 100.]]))[0]
-    foot, grasp = base_grasp_point(pix, H_i2b, T_base_board, 40.0)
-    foot_true = transform_points(T_base_board, np.array([140., 100., 0.]))
-    assert np.allclose(foot, foot_true, atol=1e-6)
+    foot, grasp = base_grasp_point(pix, H_i2b, H_board2base, z_plane, 40.0)
+    bxy_true = np.array([140., 100.])
+    base_xy_true = apply_homography(H_board2base, bxy_true.reshape(1, 2))[0]
+    assert np.allclose(foot[:2], base_xy_true, atol=1e-6)
+    assert abs(foot[2] - apply_plane(z_plane, bxy_true)) < 1e-9
     assert abs((grasp[2] - foot[2]) - 40.0) < 1e-9
     print(f"[chain] footprint_base={foot.round(2)} grasp_z=+40 OK")
     print("all geometry self-tests passed")

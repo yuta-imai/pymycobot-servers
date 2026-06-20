@@ -60,9 +60,9 @@ def _centroid_pixel(contour):
     return np.array([m["m10"] / m["m00"], m["m01"] / m["m00"]])
 
 
-def _yaw_deg_base(contour, H_img2board, T_base_board):
+def _yaw_deg_base(contour, H_img2board, H_board2base):
     """Object long-axis as a base-frame yaw (deg): map the minAreaRect long axis
-    through the homography to the board plane, then into base. Informational --
+    image->board->base (both homographies) and take the angle. Informational --
     solve_topdown_ik currently ignores yaw."""
     import cv2
     (cx, cy), (w, h), ang = cv2.minAreaRect(contour)
@@ -70,13 +70,13 @@ def _yaw_deg_base(contour, H_img2board, T_base_board):
     L = max(w, h) / 2.0
     p0 = np.array([cx, cy])
     p1 = p0 + L * np.array([np.cos(long_ang), np.sin(long_ang)])
-    b0, b1 = apply_homography(H_img2board, np.vstack([p0, p1]))
-    v_board = np.array([b1[0] - b0[0], b1[1] - b0[1], 0.0])
-    v_base = T_base_board[:3, :3] @ v_board
-    return float(np.degrees(np.arctan2(v_base[1], v_base[0])))
+    b = apply_homography(H_img2board, np.vstack([p0, p1]))
+    base = apply_homography(H_board2base, b)
+    v = base[1] - base[0]
+    return float(np.degrees(np.arctan2(v[1], v[0])))
 
 
-def locate(frame, H_img2board, T_base_board, ref_gray, grasp_z_offset=None):
+def locate(frame, H_img2board, b2b, ref_gray, grasp_z_offset=None):
     import cv2
     grasp_z_offset = config.GRASP.grasp_z_offset_mm if grasp_z_offset is None \
         else grasp_z_offset
@@ -87,8 +87,9 @@ def locate(frame, H_img2board, T_base_board, ref_gray, grasp_z_offset=None):
 
     pixel = _centroid_pixel(contour)
     bxy = apply_homography(H_img2board, np.asarray(pixel).reshape(1, 2))[0]
-    foot, grasp = base_grasp_point(pixel, H_img2board, T_base_board, grasp_z_offset)
-    yaw = _yaw_deg_base(contour, H_img2board, T_base_board)
+    foot, grasp = base_grasp_point(pixel, H_img2board, b2b["H_board2base"],
+                                   b2b["z_plane"], grasp_z_offset)
+    yaw = _yaw_deg_base(contour, H_img2board, b2b["H_board2base"])
     return {
         "ok": True,
         "base_xyz_mm": [round(float(v), 1) for v in grasp],
@@ -133,12 +134,12 @@ def main():
     H = fit_from_frame(frame)["H_img2board"] if args.refresh \
         else load_homography()["H_img2board"]
     H = np.array(H, float)
-    T_base_board = load_board_to_base()
+    b2b = load_board_to_base()
     ref = cv2.imread(REF_PATH, cv2.IMREAD_GRAYSCALE)
     if ref is None:
         raise SystemExit(f"no empty-board reference at {REF_PATH}; run --save-ref")
 
-    result = locate(frame, H, T_base_board, ref)
+    result = locate(frame, H, b2b, ref)
     print(json.dumps(result) if args.json else json.dumps(result, indent=2))
 
 

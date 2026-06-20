@@ -119,7 +119,8 @@ def step_touch(args, corner_ids):
     print(f"  touching {len(corner_ids)} numbered targets (see touch_targets.png).")
     print("  keep the closed gripper VERTICAL (straight down) at every point.")
     ns = SimpleNamespace(corner_ids=",".join(map(str, corner_ids)), n=args.n,
-                         port=args.port, baudrate=args.baudrate, scale=args.scale)
+                         port=args.port, baudrate=args.baudrate,
+                         ransac_mm=args.ransac_mm, scale=False)
     tc.collect(ns)
 
 
@@ -135,14 +136,11 @@ def step_summary():
         print("  homography : MISSING")
     if os.path.exists(bp):
         d = json.load(open(bp))
-        print(f"  board->base: RMS {d['rms_mm']:.2f} mm, scale {d.get('scale',1):.4f}, "
-              f"Z-spread {d.get('z_spread_mm', float('nan')):.1f} mm "
-              f"({len(d['corner_ids'])} pts)")
-        if d.get("scale_estimated") and abs(d.get("scale", 1) - 1) > 0.03:
-            print(f"  -> scale {d['scale']:.3f}: MEASURE a square and set "
-                  "config.BOARD.square_length_mm")
-        if d["rms_mm"] > 3.0:
-            print("  -> board->base RMS high: re-run touch, keep gripper vertical")
+        print(f"  board->base: homography(xy) rms {d['xy_rms_mm']:.2f} / max "
+              f"{d['xy_max_mm']:.2f} mm, z rms {d['z_rms_mm']:.2f} mm, "
+              f"{d['n_inliers']}/{d['n_points']} inliers")
+        if d["xy_rms_mm"] > 4.0:
+            print("  -> xy rms high: add more spread points / re-touch outliers")
     else:
         print("  board->base: MISSING")
     print(f"  square_length_mm in config = {config.BOARD.square_length_mm} "
@@ -160,9 +158,9 @@ def main():
                     choices=[None, "soracom", "rtsp", "mcp"])
     ap.add_argument("--corner-ids", default=None,
                     help="explicit touch corner ids (else auto-picked in step 1)")
-    ap.add_argument("--n", type=int, default=6, help="number of touch targets")
-    ap.add_argument("--scale", action="store_true",
-                    help="estimate board->base similarity scale (square unmeasured)")
+    ap.add_argument("--n", type=int, default=9, help="number of touch targets")
+    ap.add_argument("--ransac-mm", type=float, default=8.0,
+                    help="RANSAC reprojection threshold (mm) for touch outliers")
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--baudrate", type=int, default=115200)
     ap.add_argument("--yes", action="store_true", help="don't prompt before grabbing")

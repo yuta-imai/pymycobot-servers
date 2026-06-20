@@ -30,7 +30,7 @@ import numpy as np
 
 import config
 from geometry import (kabsch, umeyama, rigid_fit_residuals, transform_points,
-                      make_transform)
+                      make_transform, apply_homography, apply_plane, fit_plane)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,42 +182,58 @@ def collect(args):
             pass
         ctrl.disconnect() if hasattr(ctrl, "disconnect") else None
 
-    if len(src_board) < 3:
-        raise SystemExit(f"need >= 3 sampled points, got {len(src_board)}")
+    if len(src_board) < 4:
+        raise SystemExit(f"need >= 4 points for a homography, got {len(src_board)}")
+    import cv2
     src = np.array(src_board, float)
     dst = np.array(dst_base, float)
-    T, scale = umeyama(src, dst, with_scale=args.scale)
-    rms, mx, per = rigid_fit_residuals(T, src, dst)
-    # planarity check: touches on a flat board should be near-coplanar in base
-    z_spread = float(dst[:, 2].max() - dst[:, 2].min())
-    print(f"\n[fit] board->base RMS={rms:.2f} mm  max={mx:.2f} mm  "
-          f"scale={scale:.4f}{'  (estimated)' if args.scale else '  (fixed=1)'}")
-    print(f"      base-Z spread of touches = {z_spread:.1f} mm "
-          f"(should be small; large => inconsistent gripper orientation)")
-    for cid, e in zip(used_ids, per):
-        print(f"   corner {cid}: residual {e:.2f} mm")
-    if args.scale and abs(scale - 1.0) > 0.03:
-        print(f"NOTE: scale {scale:.3f} differs from 1 by >3% — your "
-              "square_length_mm is likely off; measure and set config.BOARD.")
-    if rms > 3.0:
-        print("WARN: RMS > 3 mm — re-touch the worst corners or add points.")
+    src_xy, base_xy, base_z = src[:, :2], dst[:, :2], dst[:, 2]
+    # board(X,Y) -> base(x,y) as a HOMOGRAPHY (absorbs the arm's projective
+    # corrected_fk distortion; a rigid fit fails on this unit), RANSAC rejects
+    # mis-touches; base z as a tilted plane. See geometry.base_grasp_point.
+    H, mask = cv2.findHomography(src_xy, base_xy, cv2.RANSAC,
+                                 ransacReprojThreshold=args.ransac_mm)
+    if H is None:
+        raise SystemExit("homography fit failed (degenerate/too few points?)")
+    inl = mask.ravel().astype(bool)
+    if inl.sum() < 4:
+        print("  NOTE: RANSAC kept <4; falling back to all points")
+        inl = np.ones(len(src), bool)
+    z_plane = fit_plane(src_xy[inl], base_z[inl])
+    xy_res = np.linalg.norm(apply_homography(H, src_xy) - base_xy, axis=1)
+    z_res = np.abs(apply_plane(z_plane, src_xy) - base_z)
+    xy_rms = float(np.sqrt(np.mean(xy_res[inl] ** 2)))
+    z_rms = float(np.sqrt(np.mean(z_res[inl] ** 2)))
+    print(f"\n[fit] board->base = homography(xy)+plane(z)  "
+          f"{int(inl.sum())}/{len(src)} inliers")
+    print(f"      xy residual: rms={xy_rms:.2f} max={xy_res[inl].max():.2f} mm")
+    print(f"      z  residual: rms={z_rms:.2f} max={z_res[inl].max():.2f} mm")
+    for cid, e, ok in zip(used_ids, xy_res, inl):
+        print(f"   corner {cid}: xy {e:.2f} mm" + ("" if ok else "  <-- OUTLIER (rejected)"))
+    if xy_rms > 4.0:
+        print("WARN: xy rms > 4 mm — add more spread points or re-touch outliers.")
 
     config.ensure_artifact_dir()
     out = config.artifact_path(config.HANDEYE_JSON)
     with open(out, "w") as f:
-        json.dump({"T_base_board": T.tolist(), "scale": scale,
-                   "scale_estimated": bool(args.scale),
-                   "rms_mm": rms, "max_mm": mx, "z_spread_mm": z_spread,
+        json.dump({"model": "homography+plane",
+                   "H_board2base": H.tolist(), "z_plane": z_plane.tolist(),
+                   "xy_rms_mm": xy_rms, "xy_max_mm": float(xy_res[inl].max()),
+                   "z_rms_mm": z_rms, "n_points": len(src),
+                   "n_inliers": int(inl.sum()), "inliers": inl.tolist(),
                    "corner_ids": used_ids,
                    "src_board_mm": src.tolist(),
                    "dst_base_mm": dst.tolist()}, f, indent=2)
     print(f"wrote {out}")
 
 
-def load_board_to_base(path: str = None) -> np.ndarray:
+def load_board_to_base(path: str = None) -> dict:
+    """Return {H_board2base (3x3), z_plane (3,)} for board(X,Y)->base(x,y,z)."""
     path = path or config.artifact_path(config.HANDEYE_JSON)
     with open(path) as f:
-        return np.array(json.load(f)["T_base_board"], float)
+        d = json.load(f)
+    return {"H_board2base": np.array(d["H_board2base"], float),
+            "z_plane": np.array(d["z_plane"], float)}
 
 
 def main():
@@ -228,14 +244,15 @@ def main():
                       help="design study: point-count/spread vs fit error")
     mode.add_argument("--collect", action="store_true",
                       help="live touch calibration on the robot host")
-    ap.add_argument("--n", type=int, default=6, help="number of touch points")
+    ap.add_argument("--n", type=int, default=9, help="number of touch points "
+                    "(>=8 recommended for a robust homography + outlier rejection)")
     ap.add_argument("--corner-ids", default=None,
                     help="explicit comma-separated ChArUco corner ids to touch, "
                          "in order (matches a numbered reference image); "
                          "overrides --n/auto-pick")
-    ap.add_argument("--scale", action="store_true",
-                    help="estimate a similarity scale (safety net for an "
-                         "unmeasured square_length_mm); default rigid (scale=1)")
+    ap.add_argument("--ransac-mm", type=float, default=8.0,
+                    help="RANSAC reprojection threshold (mm) for outlier rejection")
+    ap.add_argument("--scale", action="store_true", help="(deprecated, ignored)")
     ap.add_argument("--noise-mm", type=float, default=1.0, help="(simulate) touch noise")
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--baudrate", type=int, default=115200)
