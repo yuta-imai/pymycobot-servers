@@ -65,23 +65,34 @@ def main():
     ap.add_argument("--hover-mm", type=float, default=15.0,
                     help="command z = board plane + this (near surface, small parallax)")
     ap.add_argument("--ransac-mm", type=float, default=8.0)
+    ap.add_argument("--targets", default=None,
+                    help="board points to command via bootstrap, 'x1,y1;...' (mm)")
+    ap.add_argument("--base-targets", default=None,
+                    help="command BASE poses DIRECTLY (no bootstrap), 'x,y,z;...' mm; "
+                         "use reachable-region poses so every command lands.")
     args = ap.parse_args()
     import cv2
     base_url = f"http://{args.host}:{args.port}"
 
     b2b = json.load(open(config.artifact_path(config.HANDEYE_JSON)))
     H0 = np.array(b2b["H_board2base"]); zpl0 = np.array(b2b["z_plane"])
-    targets = default_targets()
-    print(f"[refine] bootstrap board->base loaded; commanding {len(targets)} targets")
+    if args.base_targets:
+        cmds = [tuple(float(v) for v in p.split(",")) for p in args.base_targets.split(";")]
+    elif args.targets:
+        tg = [tuple(float(v) for v in p.split(",")) for p in args.targets.split(";")]
+        cmds = [(*apply_homography(H0, np.array([D], float))[0],
+                 float(apply_plane(zpl0, np.array(D, float))) + args.hover_mm) for D in tg]
+    else:
+        cmds = [(*apply_homography(H0, np.array([D], float))[0],
+                 float(apply_plane(zpl0, np.array(D, float))) + args.hover_mm)
+                for D in default_targets()]
+    print(f"[refine] commanding {len(cmds)} poses; read each landing off the grid")
 
     obs_board, cmd_base = [], []
-    for k, D in enumerate(targets):
-        bxy = apply_homography(H0, np.array([D], float))[0]
-        z = float(apply_plane(zpl0, np.array(D, float))) + args.hover_mm
-        print(f"\n[{k+1}/{len(targets)}] target board=({D[0]:.0f},{D[1]:.0f}) "
-              f"-> bootstrap base=({bxy[0]:.1f},{bxy[1]:.1f},{z:.1f})")
+    for k, (cx, cy, cz) in enumerate(cmds):
+        print(f"\n[{k+1}/{len(cmds)}] command base=({cx:.1f},{cy:.1f},{cz:.1f})")
         code, resp = api_post(base_url, "/robot/topdown",
-                              {"x": float(bxy[0]), "y": float(bxy[1]), "z": z, "speed": 20})
+                              {"x": float(cx), "y": float(cy), "z": float(cz), "speed": 20})
         if code != 200:
             print(f"   unreachable/skip ({code}: {resp.get('detail','')})"); continue
         ans = input("   read the gripper-tip ACTUAL board x,y (mm) off the grid "
@@ -89,7 +100,7 @@ def main():
         if ans == "s" or "," not in ans:
             print("   skipped"); continue
         ox, oy = (float(v) for v in ans.split(","))
-        obs_board.append([ox, oy]); cmd_base.append([float(bxy[0]), float(bxy[1]), z])
+        obs_board.append([ox, oy]); cmd_base.append([cx, cy, cz])
         print(f"   recorded observed board=({ox:.0f},{oy:.0f})")
 
     if len(obs_board) < 4:
@@ -101,9 +112,11 @@ def main():
     inl = mask.ravel().astype(bool)
     if inl.sum() < 4:
         inl = np.ones(len(O), bool)
-    zpl = fit_plane(O[inl], B[inl, 2])   # note: commanded z already had hover added
-    # subtract hover so the saved plane is the board-surface command-z
-    zpl = zpl.copy(); zpl[2] -= args.hover_mm
+    zpl = fit_plane(O[inl], B[inl, 2]).copy()
+    # bootstrap modes added hover to the commanded z; remove it so the saved plane
+    # is the board-surface command-z. --base-targets z is used as-is.
+    if not args.base_targets:
+        zpl[2] -= args.hover_mm
     res = np.linalg.norm(apply_homography(G, O) - B[:, :2], axis=1)
     print(f"\n[fit] camera-observed board->base: {int(inl.sum())}/{len(O)} inliers  "
           f"xy rms={np.sqrt(np.mean(res[inl]**2)):.2f} max={res[inl].max():.2f} mm")
