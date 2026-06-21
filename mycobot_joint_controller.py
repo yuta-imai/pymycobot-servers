@@ -823,6 +823,17 @@ class MyCobotJointController:
                 pass
         seeds += [[0, 0, -90, 0, 90, 0], [0, -20, -90, 0, 90, 0],
                   [10, -30, -80, 20, 70, 0]]
+        # Diverse shoulder/elbow basins: this unit needs varied seeds to find
+        # near-surface top-down solutions (elbow-up/folded configs the simple
+        # forward-reach seeds miss). J1 is seeded toward the target azimuth.
+        try:
+            azi = math.degrees(math.atan2(target[1], target[0]))
+        except Exception:
+            azi = 0.0
+        for j1 in (azi, azi - 40.0, azi + 40.0, 0.0):
+            for j2, j3, j4 in [(-30, -90, 30), (0, -150, 120), (-50, -110, 80),
+                               (-10, 150, 120), (20, -80, 20), (-40, 140, 110)]:
+                seeds.append([j1, j2, j3, j4, 80.0, 0.0])
 
         def resid(q):
             fr = self._cm_frames(q)
