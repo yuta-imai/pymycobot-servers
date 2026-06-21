@@ -830,10 +830,11 @@ class MyCobotJointController:
             azi = math.degrees(math.atan2(target[1], target[0]))
         except Exception:
             azi = 0.0
-        for j1 in (azi, azi - 40.0, azi + 40.0, 0.0):
-            for j2, j3, j4 in [(-30, -90, 30), (0, -150, 120), (-50, -110, 80),
-                               (-10, 150, 120), (20, -80, 20), (-40, 140, 110)]:
-                seeds.append([j1, j2, j3, j4, 80.0, 0.0])
+        # A few diverse shoulder/elbow basins seeded toward the target azimuth
+        # (kept small: each adds a least_squares solve).
+        for j2, j3, j4 in [(-30, -90, 30), (0, 150, 120),
+                           (-50, -110, 80), (20, -80, 20)]:
+            seeds.append([azi, j2, j3, j4, 80.0, 0.0])
 
         def resid(q):
             fr = self._cm_frames(q)
@@ -846,7 +847,7 @@ class MyCobotJointController:
             s = np.clip(np.array(s, float), lo, hi)
             try:
                 sol = least_squares(resid, s, bounds=(lo, hi), method="trf",
-                                    max_nfev=4000)
+                                    max_nfev=1500)
             except Exception:
                 continue
             q = [float(v) for v in sol.x]
