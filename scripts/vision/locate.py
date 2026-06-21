@@ -128,13 +128,15 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--image", help="frame to process")
-    src.add_argument("--grab", action="store_true")
+    src.add_argument("--grab", action="store_true", help="grab via frame_source backend")
+    src.add_argument("--mcp-json", default=None,
+                     help="read a saved soracam MCP still result (JSON w/ imageBase64); "
+                          "single-credential path via the soracam MCP, no .env")
     ap.add_argument("--save-ref", action="store_true",
                     help="save this (empty-board) frame as the reference and exit")
     ap.add_argument("--refresh", action="store_true",
                     help="re-fit the homography from this frame (drift robustness)")
     ap.add_argument("--url", default=None)
-    ap.add_argument("--mcp-json", default=None)
     ap.add_argument("--json", action="store_true", help="print only the result JSON")
     ap.add_argument("--save-annot", default=None,
                     help="save an annotated crop (board dimmed, detection marked)")
@@ -146,9 +148,12 @@ def main():
         frame = cv2.imread(args.image)
         if frame is None:
             raise SystemExit(f"cannot read {args.image}")
+    elif args.mcp_json:
+        from frame_source import from_mcp_still
+        frame = from_mcp_still(args.mcp_json)
     else:
         from frame_source import grab
-        frame = grab(url=args.url, mcp_json=args.mcp_json)
+        frame = grab(url=args.url)
 
     if args.save_ref:
         config.ensure_artifact_dir()

@@ -79,9 +79,10 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--image", help="frame with the board fully visible")
-    src.add_argument("--grab", action="store_true")
+    src.add_argument("--grab", action="store_true", help="grab via frame_source backend")
+    src.add_argument("--mcp-json", default=None,
+                     help="read a saved soracam MCP still result (single-credential path)")
     ap.add_argument("--url", default=None)
-    ap.add_argument("--mcp-json", default=None)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -89,9 +90,12 @@ def main():
         frame = cv2.imread(args.image)
         if frame is None:
             raise SystemExit(f"cannot read {args.image}")
+    elif args.mcp_json:
+        from frame_source import from_mcp_still
+        frame = from_mcp_still(args.mcp_json)
     else:
         from frame_source import grab
-        frame = grab(url=args.url, mcp_json=args.mcp_json)
+        frame = grab(url=args.url)
 
     result = fit_from_frame(frame)
     config.ensure_artifact_dir()
