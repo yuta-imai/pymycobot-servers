@@ -20,6 +20,26 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))            # project root
 ARTIFACT_DIR = os.path.join(HERE, "calib")              # calibration outputs live here
 
+
+def _load_dotenv(path: str) -> None:
+    """Load simple KEY=VALUE lines into os.environ (without overriding existing).
+
+    Lets the brain hold SORACOM creds in a gitignored scripts/vision/.soracom.env
+    so the one-shot grab tools work without the MCP. Never logged.
+    """
+    if not os.path.isfile(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_dotenv(os.path.join(HERE, ".soracom.env"))
+
 # --- artifact file names (under ARTIFACT_DIR) -------------------------------
 HOMOGRAPHY_JSON = "homography.json"      # pixel<->board-plane homography (step A)
 HANDEYE_JSON = "board_to_base.json"      # board->base (similarity) transform (step B)

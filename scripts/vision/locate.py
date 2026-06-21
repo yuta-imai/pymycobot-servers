@@ -35,11 +35,29 @@ from geometry import apply_homography, base_grasp_point
 REF_PATH = config.artifact_path("empty_board_ref.png")
 
 
-def _largest_object_blob(gray, ref_gray, min_area_frac=0.002):
+def board_region_mask(shape, H_img2board, inset_mm=8.0):
+    """Binary mask of the board surface in the image (so detection ignores the
+    moving background/person and anything off the board). Built by mapping the
+    board's mm extent corners into the image via the inverse homography."""
+    import cv2
+    H_board2img = np.linalg.inv(np.asarray(H_img2board, float))
+    w, h = config.BOARD.width_mm, config.BOARD.height_mm
+    corners_mm = np.array([[inset_mm, inset_mm], [w - inset_mm, inset_mm],
+                           [w - inset_mm, h - inset_mm], [inset_mm, h - inset_mm]],
+                          float)
+    poly = apply_homography(H_board2img, corners_mm).astype(np.int32)
+    mask = np.zeros(shape[:2], np.uint8)
+    cv2.fillConvexPoly(mask, poly, 255)
+    return mask
+
+
+def _largest_object_blob(gray, ref_gray, region_mask=None, min_area_frac=0.002):
     import cv2
     diff = cv2.absdiff(gray, ref_gray)
     diff = cv2.GaussianBlur(diff, (5, 5), 0)
     _, mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if region_mask is not None:
+        mask = cv2.bitwise_and(mask, region_mask)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
@@ -76,12 +94,15 @@ def _yaw_deg_base(contour, H_img2board, H_board2base):
     return float(np.degrees(np.arctan2(v[1], v[0])))
 
 
-def locate(frame, H_img2board, b2b, ref_gray, grasp_z_offset=None):
+def locate(frame, H_img2board, b2b, ref_gray, grasp_z_offset=None,
+           min_area_frac=0.002):
     import cv2
     grasp_z_offset = config.GRASP.grasp_z_offset_mm if grasp_z_offset is None \
         else grasp_z_offset
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    contour = _largest_object_blob(gray, ref_gray)
+    region = board_region_mask(gray.shape, H_img2board)
+    contour = _largest_object_blob(gray, ref_gray, region_mask=region,
+                                   min_area_frac=min_area_frac)
     if contour is None:
         return {"ok": False, "reason": "no_object_found"}
 
@@ -115,6 +136,10 @@ def main():
     ap.add_argument("--url", default=None)
     ap.add_argument("--mcp-json", default=None)
     ap.add_argument("--json", action="store_true", help="print only the result JSON")
+    ap.add_argument("--save-annot", default=None,
+                    help="save an annotated crop (board dimmed, detection marked)")
+    ap.add_argument("--min-area-frac", type=float, default=0.002,
+                    help="min object blob area as fraction of the image (lower for small objects)")
     args = ap.parse_args()
 
     if args.image:
@@ -139,7 +164,18 @@ def main():
     if ref is None:
         raise SystemExit(f"no empty-board reference at {REF_PATH}; run --save-ref")
 
-    result = locate(frame, H, b2b, ref)
+    result = locate(frame, H, b2b, ref, min_area_frac=args.min_area_frac)
+    if args.save_annot and result.get("ok"):
+        vis = frame.copy()
+        region = board_region_mask(frame.shape, H)
+        vis[region == 0] = (vis[region == 0] * 0.4).astype("uint8")
+        px = tuple(int(v) for v in result["pixel"])
+        cv2.circle(vis, px, 14, (0, 0, 255), 3)
+        cv2.putText(vis, f"board{result['board_xy_mm']}", (px[0] + 12, px[1]),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        r = 220
+        crop = vis[max(0, px[1] - r):px[1] + r, max(0, px[0] - r):px[0] + r]
+        cv2.imwrite(args.save_annot, crop)
     print(json.dumps(result) if args.json else json.dumps(result, indent=2))
 
 
