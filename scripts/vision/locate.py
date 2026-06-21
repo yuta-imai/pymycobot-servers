@@ -122,6 +122,24 @@ def locate(frame, H_img2board, b2b, ref_gray, grasp_z_offset=None,
     }
 
 
+def grasp_succeeded(before_xy_mm, after_frame, H_img2board, b2b, ref_gray,
+                    tol_mm=20.0, min_area_frac=0.0008):
+    """Vision-based grasp check (no gripper feedback on this unit).
+
+    Call AFTER lift + return-to-home (so a grasped object leaves the board).
+    Grasped == the object is gone from its pre-pick board location:
+    locate finds nothing on the board, or the nearest blob moved > tol_mm.
+    """
+    res = locate(after_frame, H_img2board, b2b, ref_gray,
+                 min_area_frac=min_area_frac)
+    if not res.get("ok"):
+        return {"grasped": True, "reason": "board_empty"}
+    axy = res["board_xy_mm"]
+    dist = ((axy[0] - before_xy_mm[0]) ** 2 + (axy[1] - before_xy_mm[1]) ** 2) ** 0.5
+    return {"grasped": dist > tol_mm, "reason": "object_still_on_board",
+            "after_board_xy_mm": axy, "moved_mm": round(float(dist), 1)}
+
+
 def main():
     import cv2
     ap = argparse.ArgumentParser(description=__doc__,
@@ -142,6 +160,9 @@ def main():
                     help="save an annotated crop (board dimmed, detection marked)")
     ap.add_argument("--min-area-frac", type=float, default=0.002,
                     help="min object blob area as fraction of the image (lower for small objects)")
+    ap.add_argument("--verify-removed", default=None, metavar="X,Y",
+                    help="grasp check: report grasped=true if no object remains near "
+                         "board (X,Y) mm (run after pick+home)")
     args = ap.parse_args()
 
     if args.image:
@@ -168,6 +189,13 @@ def main():
     ref = cv2.imread(REF_PATH, cv2.IMREAD_GRAYSCALE)
     if ref is None:
         raise SystemExit(f"no empty-board reference at {REF_PATH}; run --save-ref")
+
+    if args.verify_removed:
+        bx, by = (float(v) for v in args.verify_removed.split(","))
+        out = grasp_succeeded((bx, by), frame, H, b2b, ref,
+                              min_area_frac=args.min_area_frac)
+        print(json.dumps(out))
+        return
 
     result = locate(frame, H, b2b, ref, min_area_frac=args.min_area_frac)
     if args.save_annot and result.get("ok"):
