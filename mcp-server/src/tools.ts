@@ -218,6 +218,22 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
   );
 
   server.registerTool(
+    "move_topdown",
+    {
+      title: "Top-down move to (x,y,z)",
+      description:
+        "Move the gripper straight down to base-frame (x,y,z) in mm via the accel-calibrated top-down IK. Fails (400) if unreachable. For eye-to-hand calibration and picking.",
+      inputSchema: {
+        x: z.number().describe("Target X (mm, base frame)"),
+        y: z.number().describe("Target Y (mm)"),
+        z: z.number().describe("Target Z (mm), top-down approach"),
+        speed: z.number().int().min(1).max(100).describe("Speed 1-100 (default 25)").optional(),
+      },
+    },
+    ({ x, y, z: zz, speed }) => run(() => client.moveTopdown(x, y, zz, speed)),
+  );
+
+  server.registerTool(
     "release_all_servos",
     {
       title: "Relax whole arm",

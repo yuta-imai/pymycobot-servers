@@ -312,6 +312,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/robot/topdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Top-down move to (x,y,z)
+         * @description Move the gripper straight down to (x,y,z) via the accelerometer-calibrated top-down IK (solve_topdown_ik -> send_angles). Returns 400 if the pose is unreachable (nothing is sent). Used by eye-to-hand calibration (command-observe) and picking.
+         */
+        post: operations["move_topdown"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/robot/status": {
         parameters: {
             query?: never;
@@ -568,6 +588,16 @@ export interface components {
              * @default 50
              * @example 50
              */
+            speed?: number;
+        };
+        TopdownRequest: {
+            /** Format: float */
+            x: number;
+            /** Format: float */
+            y: number;
+            /** Format: float */
+            z: number;
+            /** @default 25 */
             speed?: number;
         };
         WaitRequest: {
@@ -1450,6 +1480,48 @@ export interface operations {
             };
             /** @description Not supported by this firmware/pymycobot */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    move_topdown: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TopdownRequest"];
+            };
+        };
+        responses: {
+            /** @description Top-down move command sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessResponse"];
+                };
+            };
+            /** @description Pose not reachable */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

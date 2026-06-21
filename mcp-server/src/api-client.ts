@@ -198,6 +198,14 @@ export class MyCobotClient {
     return this.unwrap(await this.client.POST("/robot/release"));
   }
 
+  async moveTopdown(x: number, y: number, z: number, speed?: number) {
+    return this.unwrap(
+      await this.client.POST("/robot/topdown", {
+        body: { x, y, z, ...(speed !== undefined ? { speed } : {}) },
+      }),
+    );
+  }
+
   async powerOn() {
     return this.unwrap(await this.client.POST("/robot/power_on"));
   }

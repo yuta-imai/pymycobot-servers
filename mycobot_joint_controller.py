@@ -783,6 +783,17 @@ class MyCobotJointController:
         z = self._cm_frames(angles_deg)[5][:3, 2]
         return [float(v) for v in z / (float(np.linalg.norm(z)) or 1e-9)]
 
+    def move_topdown(self, x: float, y: float, z: float, speed: int = 25,
+                     current_angles: Optional[List[float]] = None
+                     ) -> Optional[List[float]]:
+        """Solve top-down IK for (x,y,z) and joint-move there. Returns the 6 joint
+        angles sent, or None if unreachable (in which case nothing is sent)."""
+        q = self.solve_topdown_ik(x, y, z, current_angles=current_angles)
+        if q is None:
+            return None
+        self.mc.send_angles(q, speed)
+        return q
+
     def solve_topdown_ik(self, x: float, y: float, z: float,
                          yaw_deg: Optional[float] = None,
                          current_angles: Optional[List[float]] = None,

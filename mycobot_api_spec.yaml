@@ -544,6 +544,43 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /robot/topdown:
+    post:
+      tags:
+        - robot
+      summary: Top-down move to (x,y,z)
+      description: >-
+        Move the gripper straight down to (x,y,z) via the accelerometer-calibrated
+        top-down IK (solve_topdown_ik -> send_angles). Returns 400 if the pose is
+        unreachable (nothing is sent). Used by eye-to-hand calibration
+        (command-observe) and picking.
+      operationId: move_topdown
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TopdownRequest'
+      responses:
+        '200':
+          description: Top-down move command sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Pose not reachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /robot/status:
     get:
       tags:
@@ -913,6 +950,25 @@ components:
           maximum: 100
           default: 50
           example: 50
+
+    TopdownRequest:
+      type: object
+      required: [x, y, z]
+      properties:
+        x:
+          type: number
+          format: float
+        y:
+          type: number
+          format: float
+        z:
+          type: number
+          format: float
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 25
 
     WaitRequest:
       type: object
