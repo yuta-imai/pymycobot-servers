@@ -4,4 +4,4 @@ numpy
 ikpy
 fastapi
 uvicorn[standard]
-pydantic
+pydanticmcp[cli]
