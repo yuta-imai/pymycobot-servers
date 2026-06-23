@@ -85,6 +85,27 @@ class BoardSpec:
 BOARD = BoardSpec()
 
 
+# --- gripper marker (visual-servo end-effector tracking) --------------------
+# An ArUco marker stuck flat on the gripper TOP face, centered on the approach
+# (tip) axis, so its detected center maps (via the board homography) to the
+# gripper-tip board position regardless of J6. Printed true-scale by
+# marker_to_pdf.py. Detected full-frame; verified detectable when the room is
+# lit and the gripper top face points up (i.e. in a top-down pose) — keep these
+# detector params loose (small/blurry/oblique marker).
+@dataclass(frozen=True)
+class GripperMarkerSpec:
+    # DICT_4X4_50 (same dict as the board) so ONE detector pass finds board +
+    # gripper. id 49 is free (board uses 0-34). 4x4 has bigger cells than 5x5 =
+    # far more robust to the specular glare/blur/curl that killed the first
+    # DICT_5X5_100 marker. Print LARGE on MATTE paper, mount FLAT on a rigid card.
+    dictionary: str = "DICT_4X4_50"
+    marker_id: int = 49
+    length_mm: float = 45.0
+
+
+GRIPPER_MARKER = GripperMarkerSpec()
+
+
 # --- grasp-height constraint -------------------------------------------------
 # We do NOT recover object height from one camera. The pick Z is the board plane
 # (known in base frame from touch calibration) plus a per-class grasp offset.
