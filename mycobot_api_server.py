@@ -52,6 +52,13 @@ class SpeedRequest(BaseModel):
     speed: int = Field(50, ge=1, le=100, description="Movement speed (1-100)")
 
 
+class TopdownRequest(BaseModel):
+    x: float = Field(..., description="Target X (mm, base frame / corrected-fk space)")
+    y: float = Field(..., description="Target Y (mm)")
+    z: float = Field(..., description="Target Z (mm); top-down approach")
+    speed: int = Field(25, ge=1, le=100, description="Movement speed (1-100)")
+
+
 class WaitRequest(BaseModel):
     timeout: float = Field(15.0, ge=0.1, le=60.0, description="Maximum time to wait in seconds")
     tolerance: float = Field(
@@ -652,6 +659,49 @@ async def stop_all_joints():
         )
 
 
+@app.post("/robot/release", response_model=SuccessResponse, tags=["robot"])
+async def release_all_servos():
+    """Relax the WHOLE arm: cut torque on every joint servo so it can be moved by
+    hand (freedrive). The arm goes limp and sags under gravity — support it
+    before calling. Re-engage with POST /robot/power_on."""
+    ensure_controller()
+    try:
+        controller.release_all_servos()
+        return SuccessResponse(
+            success=True,
+            message="All servos released (arm is limp; support it). "
+                    "Use /robot/power_on to re-engage.",
+            timestamp=get_current_timestamp()
+        )
+    except NotImplementedError as e:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to release servos: {str(e)}"
+        )
+
+
+@app.post("/robot/power_on", response_model=SuccessResponse, tags=["robot"])
+async def power_on():
+    """Re-engage (power on) all joint servos after /robot/release."""
+    ensure_controller()
+    try:
+        controller.power_on()
+        return SuccessResponse(
+            success=True,
+            message="All servos powered on",
+            timestamp=get_current_timestamp()
+        )
+    except NotImplementedError as e:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to power on servos: {str(e)}"
+        )
+
+
 @app.get("/robot/status", response_model=RobotStatusResponse, tags=["robot"])
 async def get_robot_status(include_error: bool = False):
     """Get current robot status including joint angles and movement state.
@@ -804,6 +854,35 @@ async def move_coords(request: MoveCoordsRequest):
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=robot_error_detail("Failed to move to coords", e),
+        )
+
+
+@app.post("/robot/topdown", response_model=SuccessResponse, tags=["robot"])
+async def move_topdown(request: TopdownRequest):
+    """Move the gripper straight-DOWN to (x,y,z) via the accel-calibrated top-down
+    IK (solve_topdown_ik -> send_angles). 400 if unreachable (nothing is sent).
+    Used by eye-to-hand calibration (command-observe) and picking."""
+    ensure_controller()
+    try:
+        q = controller.move_topdown(request.x, request.y, request.z, request.speed)
+        if q is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Top-down pose ({request.x:.1f},{request.y:.1f},"
+                       f"{request.z:.1f}) not reachable",
+            )
+        return SuccessResponse(
+            success=True,
+            message=f"Top-down move to ({request.x:.1f},{request.y:.1f},"
+                    f"{request.z:.1f}); joints={[round(a,1) for a in q]}",
+            timestamp=get_current_timestamp(),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=robot_error_detail("Failed top-down move", e),
         )
 
 

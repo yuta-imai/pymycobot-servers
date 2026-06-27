@@ -461,7 +461,27 @@ class MyCobotJointController:
     def stop_all_joints(self) -> None:
         """Stop movement of all joints."""
         self._force_stop()
-    
+
+    def release_all_servos(self) -> None:
+        """Relax the WHOLE arm: cut torque on all joint servos (free/hand-guide).
+
+        After this the arm is limp and will sag under gravity — support it. Use
+        power_on() to re-engage. Useful for freedrive calibration/teaching.
+        """
+        releaser = getattr(self.mc, "release_all_servos", None)
+        if releaser is None:
+            raise NotImplementedError(
+                "release_all_servos is not available in this pymycobot/firmware")
+        releaser()
+
+    def power_on(self) -> None:
+        """Re-engage (power on) all joint servos after a release_all_servos()."""
+        powerer = getattr(self.mc, "power_on", None)
+        if powerer is None:
+            raise NotImplementedError(
+                "power_on is not available in this pymycobot/firmware")
+        powerer()
+
     def compute_is_moving(self, current_angles: Optional[List[float]] = None,
                           eps: float = 0.5) -> bool:
         """Decide whether the robot is moving by comparing successive samples.
@@ -762,6 +782,17 @@ class MyCobotJointController:
         import numpy as np
         z = self._cm_frames(angles_deg)[5][:3, 2]
         return [float(v) for v in z / (float(np.linalg.norm(z)) or 1e-9)]
+
+    def move_topdown(self, x: float, y: float, z: float, speed: int = 25,
+                     current_angles: Optional[List[float]] = None
+                     ) -> Optional[List[float]]:
+        """Solve top-down IK for (x,y,z) and joint-move there. Returns the 6 joint
+        angles sent, or None if unreachable (in which case nothing is sent)."""
+        q = self.solve_topdown_ik(x, y, z, current_angles=current_angles)
+        if q is None:
+            return None
+        self.mc.send_angles(q, speed)
+        return q
 
     def solve_topdown_ik(self, x: float, y: float, z: float,
                          yaw_deg: Optional[float] = None,

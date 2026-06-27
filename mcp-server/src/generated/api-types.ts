@@ -272,6 +272,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/robot/release": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Release all servos (relax whole arm)
+         * @description Cut torque on every joint servo so the whole arm can be moved by hand (freedrive). The arm goes limp and sags under gravity — support it before calling. Re-engage with POST /robot/power_on.
+         */
+        post: operations["release_all_servos"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/robot/power_on": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Power on all servos
+         * @description Re-engage (power on) all joint servos after /robot/release.
+         */
+        post: operations["power_on"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/robot/topdown": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Top-down move to (x,y,z)
+         * @description Move the gripper straight down to (x,y,z) via the accelerometer-calibrated top-down IK (solve_topdown_ik -> send_angles). Returns 400 if the pose is unreachable (nothing is sent). Used by eye-to-hand calibration (command-observe) and picking.
+         */
+        post: operations["move_topdown"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/robot/status": {
         parameters: {
             query?: never;
@@ -306,6 +366,70 @@ export interface paths {
          * @description Wait for robot to complete current movement
          */
         post: operations["wait_for_completion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/robot/coords": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get current pose
+         * @description Get the current end-effector pose [x, y, z, rx, ry, rz] in mm / degrees
+         */
+        get: operations["get_coords"];
+        /**
+         * Move to pose
+         * @description Move the end-effector to an absolute Cartesian pose (non-blocking)
+         */
+        put: operations["move_coords"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/robot/coords/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check pose reachability
+         * @description Check, without moving, whether a Cartesian pose is reachable (firmware IK)
+         */
+        post: operations["check_coords_reachable"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/robot/coords/wait": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Wait for pose arrival
+         * @description Wait until the end-effector reaches its Cartesian target (converged / ik_no_solution / stalled / timeout)
+         */
+        post: operations["wait_for_coords"];
         delete?: never;
         options?: never;
         head?: never;
@@ -385,6 +509,15 @@ export interface components {
              * @example null
              */
             error_message?: string | null;
+            /** @description Joints within a few degrees of a hard limit (deadlock indicator); empty when clear */
+            joints_near_limit?: {
+                joint?: number;
+                /** Format: float */
+                angle?: number;
+                limit?: number[];
+                /** @enum {string} */
+                side?: "lower" | "upper";
+            }[];
         };
         GripperStatusResponse: {
             /**
@@ -455,6 +588,16 @@ export interface components {
              * @default 50
              * @example 50
              */
+            speed?: number;
+        };
+        TopdownRequest: {
+            /** Format: float */
+            x: number;
+            /** Format: float */
+            y: number;
+            /** Format: float */
+            z: number;
+            /** @default 25 */
             speed?: number;
         };
         WaitRequest: {
@@ -549,6 +692,131 @@ export interface components {
              * @example 0.3
              */
             max_error?: number | null;
+        };
+        MoveCoordsRequest: {
+            /**
+             * @description Target pose [x, y, z, rx, ry, rz] in mm / degrees
+             * @example [
+             *       160,
+             *       -60,
+             *       200,
+             *       -90,
+             *       0,
+             *       -90
+             *     ]
+             */
+            coords: number[];
+            /**
+             * @description Movement speed (1-100)
+             * @default 30
+             * @example 30
+             */
+            speed?: number;
+            /**
+             * @description Accepted for compatibility but IGNORED — motion is always joint-interpolated via self-computed IK (firmware Cartesian move is unsafe on this unit)
+             * @default 0
+             * @example 0
+             * @enum {integer}
+             */
+            mode?: 0 | 1;
+            /**
+             * @description Run a no-move IK reachability check before sending; reject unreachable poses with 400
+             * @default true
+             */
+            validate?: boolean;
+        };
+        CoordsRequest: {
+            /**
+             * @description Pose [x, y, z, rx, ry, rz] in mm / degrees
+             * @example [
+             *       160,
+             *       -60,
+             *       200,
+             *       -90,
+             *       0,
+             *       -90
+             *     ]
+             */
+            coords: number[];
+        };
+        WaitCoordsRequest: {
+            /** @description Optional explicit target pose [x,y,z,rx,ry,rz]. Defaults to the last commanded coords target. */
+            target?: number[] | null;
+            /**
+             * Format: float
+             * @description Position convergence tolerance in mm
+             * @default 3
+             */
+            pos_tolerance?: number;
+            /**
+             * Format: float
+             * @description Orientation convergence tolerance in degrees
+             * @default 3
+             */
+            ori_tolerance?: number;
+            /**
+             * Format: float
+             * @description Maximum time to wait in seconds
+             * @default 20
+             */
+            timeout?: number;
+        };
+        CoordsResponse: {
+            /**
+             * @example [
+             *       160,
+             *       -60,
+             *       200,
+             *       -90,
+             *       0,
+             *       -90
+             *     ]
+             */
+            coords: number[];
+            /**
+             * Format: date-time
+             * @example 2023-12-01T12:00:00Z
+             */
+            timestamp: string;
+        };
+        WaitCoordsResponse: {
+            /** @example true */
+            completed: boolean;
+            /**
+             * Format: float
+             * @example 2.5
+             */
+            elapsed_time: number;
+            /**
+             * @description Terminal condition
+             * @example converged
+             * @enum {string}
+             */
+            reason: "converged" | "ik_no_solution" | "robot_fault" | "stalled" | "timeout" | "no_target";
+            /**
+             * Format: float
+             * @description Max position error to target in mm at return time
+             */
+            pos_error?: number | null;
+            /**
+             * Format: float
+             * @description Max orientation error to target in degrees at return time
+             */
+            ori_error?: number | null;
+        };
+        ReachableResponse: {
+            /** @example true */
+            reachable: boolean;
+            /**
+             * @description ok = ikpy IK solved within limits (authoritative); ik_failed = no reliable IK solution; out_of_range / joint_limit = rejected; ok_unverified = ikpy/URDF unavailable, only box check ran
+             * @example ok
+             * @enum {string}
+             */
+            reason: "ok" | "ok_unverified" | "ik_failed" | "out_of_range" | "joint_limit";
+            /** @description IK joint solution in degrees (null if unreachable) */
+            ik_angles?: number[] | null;
+            /** Format: date-time */
+            timestamp: string;
         };
         SuccessResponse: {
             /** @example true */
@@ -1154,6 +1422,124 @@ export interface operations {
             };
         };
     };
+    release_all_servos: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All servos released */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessResponse"];
+                };
+            };
+            /** @description Not supported by this firmware/pymycobot */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    power_on: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All servos powered on */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessResponse"];
+                };
+            };
+            /** @description Not supported by this firmware/pymycobot */
+            501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    move_topdown: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TopdownRequest"];
+            };
+        };
+        responses: {
+            /** @description Top-down move command sent */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessResponse"];
+                };
+            };
+            /** @description Pose not reachable */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     get_robot_status: {
         parameters: {
             query?: {
@@ -1206,6 +1592,143 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WaitResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_coords: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current Cartesian pose */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoordsResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    move_coords: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveCoordsRequest"];
+            };
+        };
+        responses: {
+            /** @description Coordinate movement command sent successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessResponse"];
+                };
+            };
+            /** @description Invalid parameters (out of workspace range, bad mode/speed) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    check_coords_reachable: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CoordsRequest"];
+            };
+        };
+        responses: {
+            /** @description Reachability result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReachableResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    wait_for_coords: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["WaitCoordsRequest"];
+            };
+        };
+        responses: {
+            /** @description Target reached or terminal condition met */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WaitCoordsResponse"];
                 };
             };
             /** @description Robot connection error */

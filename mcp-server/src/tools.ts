@@ -218,6 +218,44 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
   );
 
   server.registerTool(
+    "move_topdown",
+    {
+      title: "Top-down move to (x,y,z)",
+      description:
+        "Move the gripper straight down to base-frame (x,y,z) in mm via the accel-calibrated top-down IK. Fails (400) if unreachable. For eye-to-hand calibration and picking.",
+      inputSchema: {
+        x: z.number().describe("Target X (mm, base frame)"),
+        y: z.number().describe("Target Y (mm)"),
+        z: z.number().describe("Target Z (mm), top-down approach"),
+        speed: z.number().int().min(1).max(100).describe("Speed 1-100 (default 25)").optional(),
+      },
+    },
+    ({ x, y, z: zz, speed }) => run(() => client.moveTopdown(x, y, zz, speed)),
+  );
+
+  server.registerTool(
+    "release_all_servos",
+    {
+      title: "Relax whole arm",
+      description:
+        "Cut torque on every joint servo so the WHOLE arm can be moved by hand (freedrive/teaching). WARNING: the arm goes limp and sags under gravity — make sure it is supported first. Re-engage with power_on.",
+      inputSchema: {},
+    },
+    () => run(() => client.releaseAllServos()),
+  );
+
+  server.registerTool(
+    "power_on",
+    {
+      title: "Power on servos",
+      description:
+        "Re-engage (power on) all joint servos after release_all_servos, so the arm holds position and can move under command again.",
+      inputSchema: {},
+    },
+    () => run(() => client.powerOn()),
+  );
+
+  server.registerTool(
     "wait_for_movement",
     {
       title: "Wait for movement to complete",
