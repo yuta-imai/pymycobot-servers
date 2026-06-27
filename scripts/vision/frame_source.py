@@ -184,6 +184,95 @@ def capture_burst(out_dir: str, *, url: str, count: int, interval_s: float,
     return written
 
 
+class StreamReader:
+    """Keep ONE cv2.VideoCapture open and hand back the freshest decoded frame.
+
+    A plain ``cap.read()`` returns whatever sits at the head of the decoder buffer;
+    over a buffered RTSP/DASH live view that frame can lag the real scene by up to
+    seconds. Right after a robot move that means a measurement can be taken on a
+    stale, mid-motion frame — the dominant validity threat for closed-loop / repeat-
+    ability experiments. This reader requests a 1-frame buffer and *drains* a few
+    frames on every ``latest()`` so each returned frame is close to live.
+
+    Draining cannot remove end-to-end propagation latency on its own, so callers
+    that need certainty a frame reflects a SETTLED pose should still poll
+    ``latest()`` until the observed quantity (e.g. the marker board XY) stops
+    changing across a real wall-clock window. Use as a context manager:
+
+        with StreamReader(url) as sr:
+            frame = sr.latest()
+    """
+
+    def __init__(self, url: str, *, buffersize: int = 1, warmup: int = 5,
+                 drain: int = 2, timeout_s: float = 10.0,
+                 read_timeout_ms: int = 8000, open_timeout_ms: int = 10000):
+        import cv2
+        self.url = url
+        self.drain = max(0, int(drain))
+        self.cap = self._open(cv2, url, open_timeout_ms, read_timeout_ms)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"could not open stream: {url}")
+        for prop, val in (("CAP_PROP_BUFFERSIZE", buffersize),
+                          ("CAP_PROP_READ_TIMEOUT_MSEC", read_timeout_ms)):
+            try:
+                if hasattr(cv2, prop):
+                    self.cap.set(getattr(cv2, prop), val)
+            except Exception:
+                pass
+        deadline = time.monotonic() + float(timeout_s)
+        got = 0
+        while got < max(1, warmup) and time.monotonic() < deadline:
+            ok, _ = self.cap.read()
+            if ok:
+                got += 1
+        if got == 0:
+            self.cap.release()
+            raise RuntimeError(f"stream opened but no frame read (timeout): {url}")
+
+    @staticmethod
+    def _open(cv2, url: str, open_timeout_ms: int, read_timeout_ms: int):
+        """Open with FFmpeg read/open timeouts so a stalled stream surfaces as a
+        clean read error instead of blocking grab()/read() indefinitely."""
+        params = []
+        for prop, val in (("CAP_PROP_OPEN_TIMEOUT_MSEC", open_timeout_ms),
+                          ("CAP_PROP_READ_TIMEOUT_MSEC", read_timeout_ms)):
+            if hasattr(cv2, prop):
+                params += [int(getattr(cv2, prop)), int(val)]
+        if params:
+            try:
+                return cv2.VideoCapture(url, cv2.CAP_FFMPEG, params)
+            except Exception:
+                pass
+        return cv2.VideoCapture(url)
+
+    def latest(self) -> np.ndarray:
+        """Drain the buffer and return the newest decoded BGR frame.
+
+        ``grab()`` advances without decoding (cheap), so draining skips backlogged
+        frames; the final ``read()`` decodes the freshest one. On a slow stream the
+        grabs block on new frames, which still yields a recent frame.
+        """
+        for _ in range(self.drain):
+            self.cap.grab()
+        ok, frame = self.cap.read()
+        if not ok or frame is None:
+            ok, frame = self.cap.read()          # one retry
+        if not ok or frame is None:
+            raise RuntimeError("stream read failed (EOF or URL expired)")
+        return frame
+
+    def close(self) -> None:
+        if getattr(self, "cap", None) is not None:
+            self.cap.release()
+            self.cap = None
+
+    def __enter__(self) -> "StreamReader":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
