@@ -43,6 +43,7 @@ _load_dotenv(os.path.join(HERE, ".soracom.env"))
 # --- artifact file names (under ARTIFACT_DIR) -------------------------------
 HOMOGRAPHY_JSON = "homography.json"      # pixel<->board-plane homography (step A)
 HANDEYE_JSON = "board_to_base.json"      # board->base (similarity) transform (step B)
+HANDEYE_RBF_JSON = "board_to_base_rbf.json"  # board->base RBF (non-projective; preferred if present)
 
 
 # --- ChArUco board (A4) -----------------------------------------------------

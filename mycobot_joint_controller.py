@@ -13,6 +13,32 @@ from collections import deque
 from typing import Union, List, Optional, Tuple
 
 
+class RobotMotionError(RuntimeError):
+    """A commanded motion did not complete. Carries the wait-result fields so
+    callers (and the REST layer) can report reason/elapsed/max_error."""
+
+    def __init__(self, reason: str, elapsed: Optional[float] = None,
+                 max_error: Optional[float] = None,
+                 target: Optional[List[float]] = None):
+        self.reason = reason
+        self.elapsed = elapsed
+        self.max_error = max_error
+        self.target = target
+        detail = f"motion did not complete: {reason}"
+        if max_error is not None:
+            detail += f" (max joint error {max_error:.1f} deg)"
+        super().__init__(detail)
+
+
+class RobotStallError(RobotMotionError):
+    """The arm stopped making progress before reaching the target (e.g. driven
+    into a hard stop / out-of-envelope top-down pose). The robot is stopped."""
+
+
+class RobotTimeoutError(RobotMotionError):
+    """The arm did not reach the target within the timeout. The robot is stopped."""
+
+
 class MyCobotJointController:
     """Controller class for individual joint operations on MyCobot robot."""
 
@@ -517,7 +543,8 @@ class MyCobotJointController:
     def wait_for_completion(self, target: Optional[List[float]] = None,
                             tol: float = 1.0, timeout: float = 15.0,
                             poll: float = 0.1, stall_window: float = 2.5,
-                            stall_min_progress: float = 0.3) -> dict:
+                            stall_min_progress: float = 0.3,
+                            raise_on_incomplete: bool = False) -> dict:
         """
         Wait for the robot to reach the target, with stall and timeout guards.
 
@@ -536,6 +563,10 @@ class MyCobotJointController:
             stall_window: Window (seconds) over which net progress is measured.
             stall_min_progress: Minimum net progress (degrees) within the window
                 before a non-converged pose is declared stalled.
+            raise_on_incomplete: when True, raise RobotStallError / RobotTimeoutError
+                instead of returning a non-completed result dict (the robot is
+                still stopped first). Default False preserves the dict contract the
+                REST layer relies on.
 
         Returns:
             dict with keys: completed (bool), reason (str), elapsed (float),
@@ -546,6 +577,15 @@ class MyCobotJointController:
 
         start = time.monotonic()
 
+        def _fail(result: dict) -> dict:
+            """Stopped already by the caller paths; raise or return per the flag."""
+            if raise_on_incomplete:
+                exc = RobotStallError if result["reason"] == "stalled" else RobotTimeoutError
+                raise exc(result["reason"], elapsed=result.get("elapsed"),
+                          max_error=result.get("max_error"),
+                          target=list(target) if target is not None else None)
+            return result
+
         # Fallback: no known target -> legacy is_moving() polling.
         if target is None:
             while time.monotonic() - start < timeout:
@@ -554,8 +594,8 @@ class MyCobotJointController:
                             "elapsed": time.monotonic() - start, "max_error": None}
                 time.sleep(poll)
             self._force_stop()
-            return {"completed": False, "reason": "timeout",
-                    "elapsed": time.monotonic() - start, "max_error": None}
+            return _fail({"completed": False, "reason": "timeout",
+                          "elapsed": time.monotonic() - start, "max_error": None})
 
         history = deque()  # (timestamp, angles)
         while True:
@@ -568,8 +608,8 @@ class MyCobotJointController:
                 # Transient read failure; retry until timeout.
                 if now - start > timeout:
                     self._force_stop()
-                    return {"completed": False, "reason": "timeout",
-                            "elapsed": now - start, "max_error": None}
+                    return _fail({"completed": False, "reason": "timeout",
+                                  "elapsed": now - start, "max_error": None})
                 time.sleep(poll)
                 continue
 
@@ -588,14 +628,14 @@ class MyCobotJointController:
                 progress = max(abs(c - h) for c, h in zip(cur, history[0][1]))
                 if progress < stall_min_progress:
                     self._force_stop()
-                    return {"completed": False, "reason": "stalled",
-                            "elapsed": now - start, "max_error": err}
+                    return _fail({"completed": False, "reason": "stalled",
+                                  "elapsed": now - start, "max_error": err})
 
             # 3) timeout -> cancel
             if now - start > timeout:
                 self._force_stop()
-                return {"completed": False, "reason": "timeout",
-                        "elapsed": now - start, "max_error": err}
+                return _fail({"completed": False, "reason": "timeout",
+                              "elapsed": now - start, "max_error": err})
 
             time.sleep(poll)
 

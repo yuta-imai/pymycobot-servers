@@ -30,7 +30,7 @@ import numpy as np
 import config
 from homography_calibrate import load_homography, fit_from_frame
 from touch_calibrate import load_board_to_base
-from geometry import apply_homography, base_grasp_point
+from geometry import apply_homography, base_grasp_point, board_to_base_fn
 
 REF_PATH = config.artifact_path("empty_board_ref.png")
 
@@ -89,7 +89,7 @@ def _yaw_deg_base(contour, H_img2board, H_board2base):
     p0 = np.array([cx, cy])
     p1 = p0 + L * np.array([np.cos(long_ang), np.sin(long_ang)])
     b = apply_homography(H_img2board, np.vstack([p0, p1]))
-    base = apply_homography(H_board2base, b)
+    base = board_to_base_fn(H_board2base)(b)
     v = base[1] - base[0]
     return float(np.degrees(np.arctan2(v[1], v[0])))
 

@@ -16,7 +16,9 @@ import argparse
 from datetime import datetime
 import logging
 
-from mycobot_joint_controller import MyCobotJointController
+from mycobot_joint_controller import (
+    MyCobotJointController, RobotStallError, RobotTimeoutError, RobotMotionError,
+)
 
 
 # Pydantic models for request/response
@@ -89,6 +91,12 @@ class WaitRequest(BaseModel):
     target: Optional[List[float]] = Field(
         None, min_items=6, max_items=6,
         description="Optional explicit 6-joint target. Defaults to the last commanded target."
+    )
+    raise_on_incomplete: bool = Field(
+        False,
+        description="When true, respond 409 (not 200) if the move stalls or times "
+                    "out, instead of returning completed=false. Default false keeps "
+                    "the legacy 200 contract."
     )
 
 
@@ -865,16 +873,25 @@ async def wait_for_completion(request: Optional[WaitRequest] = None):
     timeout = request.timeout if request else 15.0
     tolerance = request.tolerance if request else 1.0
     target = request.target if request else None
+    raise_on_incomplete = request.raise_on_incomplete if request else False
 
     try:
         result = controller.wait_for_completion(
-            target=target, tol=tolerance, timeout=timeout
+            target=target, tol=tolerance, timeout=timeout,
+            raise_on_incomplete=raise_on_incomplete,
         )
         return WaitResponse(
             completed=result["completed"],
             elapsed_time=result["elapsed"],
             reason=result["reason"],
             max_error=result["max_error"],
+        )
+    except RobotMotionError as e:
+        # opt-in strict mode: stall/timeout surfaces as 409 with the wait fields
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"reason": e.reason, "elapsed_time": e.elapsed,
+                    "max_error": e.max_error, "message": str(e)},
         )
     except Exception as e:
         raise HTTPException(

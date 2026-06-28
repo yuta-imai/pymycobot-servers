@@ -141,17 +141,54 @@ def apply_plane(plane: np.ndarray, xy: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # Full chain: board-plane pixel -> base-frame grasp point
 # --------------------------------------------------------------------------- #
+def board_to_base_fn(board_to_base):
+    """Return a callable f(board_xy) -> base_xy from a board->base model.
+
+    Accepts (so callers stay agnostic to the calibration kind):
+      - a callable: returned as-is
+      - a 3x3 ndarray: a plain homography
+      - a dict (loaded board_to_base.json): model="homography+plane" uses
+        H_board2base; model starting with "rbf" rebuilds an RBFInterpolator from
+        the stored observed_board_mm/commanded_base_mm. The board->base map is
+        NON-projective (corrected_fk position distortion), so a thin-plate spline
+        fits far better than a homography — see calib/board_to_base_rbf.json.
+    f accepts (2,) or (N,2) and returns the same shape.
+    """
+    if callable(board_to_base):
+        return board_to_base
+    if isinstance(board_to_base, np.ndarray):
+        H = board_to_base
+        return lambda pts: apply_homography(H, pts)
+    d = board_to_base
+    if str(d.get("model", "homography+plane")).startswith("rbf"):
+        from scipy.interpolate import RBFInterpolator
+        O = np.asarray(d["observed_board_mm"], float)
+        B = np.asarray(d["commanded_base_mm"], float)
+        rbf = RBFInterpolator(O, B, kernel=d.get("kernel", "thin_plate_spline"),
+                              smoothing=float(d.get("smoothing", 1.0)))
+
+        def _f(pts):
+            pts = np.asarray(pts, float)
+            single = pts.ndim == 1
+            out = rbf(np.atleast_2d(pts))
+            return out[0] if single else out
+        return _f
+    H = np.asarray(d["H_board2base"], float)
+    return lambda pts: apply_homography(H, pts)
+
+
 def base_grasp_point(pixel: np.ndarray, H_img2board: np.ndarray,
-                     H_board2base: np.ndarray, z_plane: np.ndarray,
+                     H_board2base, z_plane: np.ndarray,
                      grasp_z_offset_mm: float) -> Tuple[np.ndarray, np.ndarray]:
     """Object board-contact pixel -> (footprint_base_xyz, grasp_base_xyz).
 
-    pixel -> board (X,Y) via H_img2board -> base (x,y) via H_board2base, base z
-    via the fitted plane. grasp lifts the footprint by grasp_z_offset_mm in
-    corrected_fk-space z (which solve_topdown_ik targets).
+    pixel -> board (X,Y) via H_img2board -> base (x,y) via the board->base model
+    (homography OR RBF; see board_to_base_fn), base z via the fitted plane. grasp
+    lifts the footprint by grasp_z_offset_mm in corrected_fk-space z (which
+    solve_topdown_ik targets).
     """
     bxy = apply_homography(H_img2board, np.asarray(pixel, float).reshape(1, 2))[0]
-    base_xy = apply_homography(H_board2base, bxy.reshape(1, 2))[0]
+    base_xy = board_to_base_fn(H_board2base)(bxy.reshape(1, 2))[0]
     base_z = apply_plane(z_plane, bxy)
     foot = np.array([base_xy[0], base_xy[1], base_z])
     grasp = np.array([base_xy[0], base_xy[1], base_z + grasp_z_offset_mm])

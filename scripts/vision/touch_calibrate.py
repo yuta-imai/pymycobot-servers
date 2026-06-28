@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from typing import List
 
 import numpy as np
@@ -228,10 +229,27 @@ def collect(args):
 
 
 def load_board_to_base(path: str = None) -> dict:
-    """Return {H_board2base (3x3), z_plane (3,)} for board(X,Y)->base(x,y,z)."""
-    path = path or config.artifact_path(config.HANDEYE_JSON)
+    """Return {H_board2base, z_plane (3,)} for board(X,Y)->base(x,y,z).
+
+    H_board2base is whatever geometry.board_to_base_fn accepts: a 3x3 homography
+    (model "homography+plane") OR the full model dict (model "rbf-*", which is
+    NON-projective and fits much better — see calib/board_to_base_rbf.json).
+
+    If no explicit path is given, prefer the RBF calibration when present
+    (config.HANDEYE_RBF_JSON), else fall back to the homography one.
+    """
+    if path is None:
+        rbf = config.artifact_path(getattr(config, "HANDEYE_RBF_JSON",
+                                           "board_to_base_rbf.json"))
+        path = rbf if os.path.exists(rbf) else config.artifact_path(config.HANDEYE_JSON)
     with open(path) as f:
         d = json.load(f)
+    if str(d.get("model", "homography+plane")).startswith("rbf"):
+        # RBF map carries no fitted z-plane; use a flat plane at the hover/command
+        # z it was sampled at. NOTE: that is a HOVER height, not the board surface
+        # — grasp z still needs a touch calibration (touch_calibrate --collect).
+        zc = float(d.get("verified", {}).get("hover_z_cmd", d.get("z_cmd", 90.0)))
+        return {"H_board2base": d, "z_plane": np.array([0.0, 0.0, zc], float)}
     return {"H_board2base": np.array(d["H_board2base"], float),
             "z_plane": np.array(d["z_plane"], float)}
 

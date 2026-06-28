@@ -1141,6 +1141,10 @@ components:
           maxItems: 6
           nullable: true
           description: "Optional explicit 6-joint target. Defaults to the last commanded target."
+        raise_on_incomplete:
+          type: boolean
+          default: false
+          description: "When true, respond 409 if the move stalls or times out, instead of returning completed=false."
 
     GripperActionRequest:
       type: object

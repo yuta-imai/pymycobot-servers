@@ -712,6 +712,11 @@ export interface components {
             tolerance?: number;
             /** @description Optional explicit 6-joint target. Defaults to the last commanded target. */
             target?: number[] | null;
+            /**
+             * @description When true, respond 409 if the move stalls or times out, instead of returning completed=false.
+             * @default false
+             */
+            raise_on_incomplete?: boolean;
         };
         GripperActionRequest: {
             /**
