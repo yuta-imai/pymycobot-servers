@@ -43,23 +43,32 @@ def _detector():
 
 
 def _glare_robust_variants(frame):
-    """Gray variants that recover a glossy/glary marker (specular is blue-ish).
+    """Gray variants that recover a hard-to-see marker, tried in order.
 
-    Tried in order until the marker is found: plain gray, gamma-down (pull back
-    highlights), per-pixel min over RGB (drops the bluish specular), and an
+    plain gray, CLAHE (local contrast), gamma-down (pull back highlights),
+    per-pixel min over RGB (drops the bluish specular of a glossy marker), and an
     illumination-flattened (background-division) gray.
+
+    CLAHE is the load-bearing addition for an oblique/curled marker at the
+    wide-angle frame edge: with little/no white quiet zone over busy wood, the
+    plain-gray adaptive threshold cannot bound the marker, but local contrast
+    equalization makes it detectable under the SAME conservative detector params
+    (relaxing error-correction instead would flood false positives). The
+    largest-area-per-id filter in detect_marker_pixel still rejects the rare
+    small spurious hit.
     """
     import cv2
     if frame.ndim == 2:
         return [frame]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
     b, g, r = cv2.split(frame)
     gamma = np.clip(((gray / 255.0) ** 1.6) * 255, 0, 255).astype(np.uint8)
     minrgb = np.minimum(np.minimum(r, g), b)
     bg = cv2.GaussianBlur(gray, (0, 0), 25)
     flat = cv2.normalize(gray.astype(np.float32) / (bg.astype(np.float32) + 1),
                          None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    return [gray, gamma, minrgb, flat]
+    return [gray, clahe, gamma, minrgb, flat]
 
 
 def detect_marker_pixel(frame) -> Optional[np.ndarray]:
