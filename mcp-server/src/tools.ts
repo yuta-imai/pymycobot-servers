@@ -256,6 +256,46 @@ export function registerTools(server: McpServer, client: MyCobotClient): void {
   );
 
   server.registerTool(
+    "calibrate_wrist",
+    {
+      title: "Calibrate wrist (accelerometer)",
+      description:
+        "Start the accelerometer wrist calibration. LONG-RUNNING and MOVES THE ARM through a pose set, reading a BLE accelerometer at each pose, then fits and hot-reloads the corrected wrist model (fixes top-down/orientation accuracy). Power on the servos first (power_on) and clear the workspace. Returns immediately; poll get_calibrate_wrist_status for progress and the final orientation error.",
+      inputSchema: {
+        pose_set: z
+          .enum(["default", "quick"])
+          .describe("'default' (~78 poses, accurate) or 'quick' (4 poses, smoke test). Defaults to 'default'.")
+          .optional(),
+        speed: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .describe("Sweep movement speed (1-100). Defaults to 20.")
+          .optional(),
+      },
+    },
+    ({ pose_set, speed }) =>
+      run(() =>
+        client.calibrateWrist({
+          ...(pose_set !== undefined ? { pose_set } : {}),
+          ...(speed !== undefined ? { speed } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "get_calibrate_wrist_status",
+    {
+      title: "Wrist calibration status",
+      description:
+        "Poll the wrist-calibration job started by calibrate_wrist: status (idle/running/done/error), phase (collecting/fitting/done), progress (done/total), and the final orientation-error result or error message.",
+      inputSchema: {},
+    },
+    () => run(() => client.getCalibrateWristStatus()),
+  );
+
+  server.registerTool(
     "wait_for_movement",
     {
       title: "Wait for movement to complete",

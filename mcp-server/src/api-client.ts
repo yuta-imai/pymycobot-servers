@@ -210,6 +210,29 @@ export class MyCobotClient {
     return this.unwrap(await this.client.POST("/robot/power_on"));
   }
 
+  async calibrateWrist(opts?: {
+    pose_set?: string;
+    speed?: number;
+    settle?: number;
+    step?: number;
+    samples?: number;
+    still_dps?: number;
+    ble_address?: string;
+    ble_name?: string;
+    ble_mode?: string;
+    save_data?: boolean;
+  }) {
+    return this.unwrap(
+      await this.client.POST("/robot/calibrate_wrist", {
+        body: { ...(opts ?? {}) },
+      }),
+    );
+  }
+
+  async getCalibrateWristStatus() {
+    return this.unwrap(await this.client.GET("/robot/calibrate_wrist/status"));
+  }
+
   async waitForMovement(timeout?: number, tolerance?: number) {
     return this.unwrap(
       await this.client.POST("/robot/wait", {

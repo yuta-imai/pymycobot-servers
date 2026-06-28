@@ -581,6 +581,63 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /robot/calibrate_wrist:
+    post:
+      tags:
+        - robot
+      summary: Start accelerometer wrist calibration
+      description: >-
+        Start the accelerometer wrist calibration (LONG-RUNNING; moves the arm).
+        Drives a pose set, reads the BLE accelerometer's gravity vector at each
+        pose, fits the corrected wrist DH model and hot-reloads it into the live
+        controller. Servos must be powered on (POST /robot/power_on) and the
+        workspace clear. Returns immediately; poll
+        GET /robot/calibrate_wrist/status for progress and the final result.
+      operationId: calibrate_wrist
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalibrateWristRequest'
+      responses:
+        '200':
+          description: Calibration started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '409':
+          description: A calibration is already running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Robot connection error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /robot/calibrate_wrist/status:
+    get:
+      tags:
+        - robot
+      summary: Poll wrist-calibration job status
+      description: >-
+        Poll the wrist-calibration job: status (idle/running/done/error), phase
+        (collecting/fitting/done), progress, and the final orientation-error
+        result or error message.
+      operationId: get_calibrate_wrist_status
+      responses:
+        '200':
+          description: Current calibration job state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalibrateWristStatus'
+
   /robot/status:
     get:
       tags:
@@ -969,6 +1026,92 @@ components:
           minimum: 1
           maximum: 100
           default: 25
+
+    CalibrateWristRequest:
+      type: object
+      description: Parameters for the accelerometer wrist calibration sweep.
+      properties:
+        pose_set:
+          type: string
+          enum: [default, quick]
+          default: default
+          description: "'default' (~78 poses, accurate) or 'quick' (4 poses, smoke test)"
+        speed:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+        settle:
+          type: number
+          format: float
+          minimum: 0.5
+          maximum: 10.0
+          default: 3.0
+          description: Post-move settle seconds
+        step:
+          type: integer
+          minimum: 10
+          maximum: 90
+          default: 30
+          description: Joint sweep step (deg) for 'default'
+        samples:
+          type: integer
+          minimum: 4
+          maximum: 60
+          default: 12
+        still_dps:
+          type: number
+          format: float
+          default: 2.5
+          description: Stillness gate (median gyro deg/s)
+        ble_address:
+          type: string
+          nullable: true
+          default: "F7:50:70:EE:0D:DF"
+          description: BLE accelerometer MAC (WT9011DCL)
+        ble_name:
+          type: string
+          nullable: true
+        ble_mode:
+          type: string
+          default: witmotion
+        save_data:
+          type: boolean
+          default: true
+
+    CalibrateWristStatus:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [idle, running, done, error]
+        phase:
+          type: string
+          nullable: true
+        progress:
+          type: object
+          properties:
+            done:
+              type: integer
+            total:
+              type: integer
+            still:
+              type: boolean
+              nullable: true
+        started_at:
+          type: string
+          nullable: true
+        finished_at:
+          type: string
+          nullable: true
+        result:
+          type: object
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        timestamp:
+          type: string
 
     WaitRequest:
       type: object

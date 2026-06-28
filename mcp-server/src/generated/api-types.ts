@@ -332,6 +332,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/robot/calibrate_wrist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start accelerometer wrist calibration
+         * @description Start the accelerometer wrist calibration (LONG-RUNNING; moves the arm). Drives a pose set, reads the BLE accelerometer's gravity vector at each pose, fits the corrected wrist DH model and hot-reloads it into the live controller. Servos must be powered on (POST /robot/power_on) and the workspace clear. Returns immediately; poll GET /robot/calibrate_wrist/status for progress and the final result.
+         */
+        post: operations["calibrate_wrist"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/robot/calibrate_wrist/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Poll wrist-calibration job status
+         * @description Poll the wrist-calibration job: status (idle/running/done/error), phase (collecting/fitting/done), progress, and the final orientation-error result or error message.
+         */
+        get: operations["get_calibrate_wrist_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/robot/status": {
         parameters: {
             query?: never;
@@ -599,6 +639,61 @@ export interface components {
             z: number;
             /** @default 25 */
             speed?: number;
+        };
+        /** @description Parameters for the accelerometer wrist calibration sweep. */
+        CalibrateWristRequest: {
+            /**
+             * @description 'default' (~78 poses, accurate) or 'quick' (4 poses, smoke test)
+             * @default default
+             * @enum {string}
+             */
+            pose_set?: "default" | "quick";
+            /** @default 20 */
+            speed?: number;
+            /**
+             * Format: float
+             * @description Post-move settle seconds
+             * @default 3
+             */
+            settle?: number;
+            /**
+             * @description Joint sweep step (deg) for 'default'
+             * @default 30
+             */
+            step?: number;
+            /** @default 12 */
+            samples?: number;
+            /**
+             * Format: float
+             * @description Stillness gate (median gyro deg/s)
+             * @default 2.5
+             */
+            still_dps?: number;
+            /**
+             * @description BLE accelerometer MAC (WT9011DCL)
+             * @default F7:50:70:EE:0D:DF
+             */
+            ble_address?: string | null;
+            ble_name?: string | null;
+            /** @default witmotion */
+            ble_mode?: string;
+            /** @default true */
+            save_data?: boolean;
+        };
+        CalibrateWristStatus: {
+            /** @enum {string} */
+            status?: "idle" | "running" | "done" | "error";
+            phase?: string | null;
+            progress?: {
+                done?: number;
+                total?: number;
+                still?: boolean | null;
+            };
+            started_at?: string | null;
+            finished_at?: string | null;
+            result?: Record<string, never> | null;
+            error?: string | null;
+            timestamp?: string;
         };
         WaitRequest: {
             /**
@@ -1536,6 +1631,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    calibrate_wrist: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["CalibrateWristRequest"];
+            };
+        };
+        responses: {
+            /** @description Calibration started */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessResponse"];
+                };
+            };
+            /** @description A calibration is already running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Robot connection error */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_calibrate_wrist_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current calibration job state */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CalibrateWristStatus"];
                 };
             };
         };

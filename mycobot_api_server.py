@@ -59,6 +59,27 @@ class TopdownRequest(BaseModel):
     speed: int = Field(25, ge=1, le=100, description="Movement speed (1-100)")
 
 
+class CalibrateWristRequest(BaseModel):
+    """Run the accelerometer wrist calibration sweep (long-running, moves the arm).
+
+    Drives a pose set, reads gravity from the BLE sensor at each pose, fits the
+    corrected wrist model and hot-reloads it. Servos must be powered on first.
+    """
+    pose_set: str = Field(
+        "default",
+        description="'default' (~78 poses, accurate) or 'quick' (4 poses, smoke test)")
+    speed: int = Field(20, ge=1, le=100, description="Sweep movement speed (1-100)")
+    settle: float = Field(3.0, ge=0.5, le=10.0, description="Post-move settle seconds")
+    step: int = Field(30, ge=10, le=90, description="Joint sweep step (deg) for 'default'")
+    samples: int = Field(12, ge=4, le=60, description="Gravity samples per pose (~10Hz)")
+    still_dps: float = Field(2.5, ge=0.5, le=10.0, description="Stillness gate (median gyro deg/s)")
+    ble_address: Optional[str] = Field(
+        "F7:50:70:EE:0D:DF", description="BLE accelerometer MAC (WT9011DCL)")
+    ble_name: Optional[str] = Field(None, description="BLE name (alternative to address)")
+    ble_mode: str = Field("witmotion", description="BLE payload mode")
+    save_data: bool = Field(True, description="Also write the raw JSONL sweep next to the model")
+
+
 class WaitRequest(BaseModel):
     timeout: float = Field(15.0, ge=0.1, le=60.0, description="Maximum time to wait in seconds")
     tolerance: float = Field(
@@ -217,6 +238,62 @@ class ErrorResponse(BaseModel):
 
 # Global controller instance
 controller: Optional[MyCobotJointController] = None
+
+
+# ---- wrist-calibration background job -------------------------------------
+# The accel sweep is long-running (minutes, drives the arm), so it runs in a
+# daemon thread and callers poll GET /robot/calibrate_wrist/status. Only one job
+# at a time; the live controller (serial owner) drives the poses in-process.
+import threading as _threading
+
+_calib_lock = _threading.Lock()
+_calib_state = {
+    "status": "idle",          # idle | running | done | error
+    "phase": None,             # collecting | fitting | done
+    "progress": {"done": 0, "total": 0, "still": None},
+    "params": None,
+    "started_at": None,
+    "finished_at": None,
+    "result": None,
+    "error": None,
+}
+
+
+def _run_wrist_calibration(params: dict) -> None:
+    """Background worker: collect -> fit -> write -> hot-reload the wrist model."""
+    import os as _os
+    import sys as _sys
+    _wc = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                        "scripts", "wrist_calib")
+    if _wc not in _sys.path:
+        _sys.path.insert(0, _wc)
+    try:
+        import service as _service  # scripts/wrist_calib/service.py
+
+        def _progress(done, total, still):
+            _calib_state["progress"] = {"done": done, "total": total, "still": still}
+            _calib_state["phase"] = "fitting" if done >= total else "collecting"
+
+        data_out = None
+        if params.get("save_data"):
+            data_out = _os.path.join(_wc, "calib_api_latest.jsonl")
+
+        _calib_state["phase"] = "collecting"
+        result = _service.run_calibration(
+            controller,
+            pose_set=params["pose_set"], step=params["step"], speed=params["speed"],
+            settle=params["settle"], samples=params["samples"],
+            still_dps=params["still_dps"], ble_address=params.get("ble_address"),
+            ble_name=params.get("ble_name"), ble_mode=params["ble_mode"],
+            data_out=data_out, progress_cb=_progress)
+        _calib_state["phase"] = "done"
+        _calib_state["result"] = result
+        _calib_state["status"] = "done"
+    except Exception as e:  # noqa: BLE001 — surface any failure to the poller
+        _calib_state["status"] = "error"
+        _calib_state["error"] = str(e)
+    finally:
+        _calib_state["finished_at"] = get_current_timestamp()
 
 
 # FastAPI app initialization
@@ -884,6 +961,49 @@ async def move_topdown(request: TopdownRequest):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=robot_error_detail("Failed top-down move", e),
         )
+
+
+@app.post("/robot/calibrate_wrist", response_model=SuccessResponse, tags=["robot"])
+async def calibrate_wrist(request: CalibrateWristRequest):
+    """Start the accelerometer wrist calibration (LONG-RUNNING; moves the arm).
+
+    Drives the pose set, reads the BLE accelerometer's gravity vector at each pose,
+    fits the corrected wrist DH model and hot-reloads it into the live controller.
+    Servos must be powered on (POST /robot/power_on) and the workspace clear.
+
+    Returns immediately; poll GET /robot/calibrate_wrist/status for progress and
+    the final orientation-error result. Only one calibration runs at a time."""
+    ensure_controller()
+    if request.pose_set not in ("default", "quick"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="pose_set must be 'default' or 'quick'")
+    with _calib_lock:
+        if _calib_state["status"] == "running":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A wrist calibration is already running; poll "
+                       "/robot/calibrate_wrist/status")
+        params = request.dict()
+        _calib_state.update({
+            "status": "running", "phase": "starting",
+            "progress": {"done": 0, "total": 0, "still": None},
+            "params": params, "started_at": get_current_timestamp(),
+            "finished_at": None, "result": None, "error": None,
+        })
+    _threading.Thread(target=_run_wrist_calibration, args=(params,),
+                      daemon=True).start()
+    return SuccessResponse(
+        success=True,
+        message=f"Wrist calibration started (pose_set={params['pose_set']}); "
+                f"poll GET /robot/calibrate_wrist/status",
+        timestamp=get_current_timestamp(),
+    )
+
+
+@app.get("/robot/calibrate_wrist/status", tags=["robot"])
+async def calibrate_wrist_status():
+    """Poll the wrist-calibration job (status/phase/progress/result/error)."""
+    return {**_calib_state, "timestamp": get_current_timestamp()}
 
 
 @app.post("/robot/coords/check", response_model=ReachableResponse, tags=["robot"])
