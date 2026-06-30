@@ -30,6 +30,12 @@ class MoveJointRequest(BaseModel):
 class MoveAllJointsRequest(BaseModel):
     angles: List[float] = Field(..., min_items=6, max_items=6, description="6 joint angles in degrees")
     speed: int = Field(50, ge=1, le=100, description="Movement speed (1-100)")
+    verify: bool = Field(
+        False,
+        description="When true, BLOCK and guarantee the move lands: send all joints, "
+                    "then read back and re-send any straggler joint individually "
+                    "(works around flaky multi-joint delivery). Returns once reached "
+                    "or after retries. Default false = legacy non-blocking send.")
 
 
 class JogJointRequest(BaseModel):
@@ -486,6 +492,14 @@ async def move_all_joints(request: MoveAllJointsRequest):
     ensure_controller()
     
     try:
+        if request.verify:
+            res = controller.move_all_joints_safe(request.angles, request.speed)
+            return SuccessResponse(
+                success=bool(res.get("reached")),
+                message=f"Verified move to {request.angles}: reached={res.get('reached')} "
+                        f"rounds={res.get('rounds')} max_error={res.get('max_error')}",
+                timestamp=get_current_timestamp()
+            )
         controller.move_all_joints(request.angles, request.speed)
         return SuccessResponse(
             success=True,

@@ -436,10 +436,56 @@ class MyCobotJointController:
         self.last_target = list(angles)
         self.mc.send_angles(angles, speed)
 
-    def home_position(self, speed: int = 50) -> None:
-        """Move all joints to home position (0 degrees)."""
-        home_angles = [0, 0, 0, 0, 0, 0]
-        self.move_all_joints(home_angles, speed)
+    def move_all_joints_safe(self, angles: List[float], speed: int = 50,
+                             tol: float = 3.0, tries: int = 4,
+                             settle: float = 1.3) -> dict:
+        """Reliable multi-joint move (works around flaky serial on this unit).
+
+        A single send_angles() intermittently reaches only SOME servos (observed
+        "partial execution": e.g. a commanded joint never moves while others do).
+        This sends all joints together first, then reads back and RE-SENDS,
+        per-joint via send_angle(), any joint still beyond `tol`, for up to
+        `tries` rounds. Blocking. Returns {reached, rounds, max_error, angles}.
+
+        Use this (not move_all_joints) when the move MUST land — home, demo poses.
+        """
+        if len(angles) != 6:
+            raise ValueError("Must provide exactly 6 angles")
+        self._validate_speed(speed)
+        for i, a in enumerate(angles, 1):
+            self._validate_angle(i, a)
+        target = [float(a) for a in angles]
+        self.last_target = list(target)
+
+        def _read():
+            try:
+                return self.get_all_joint_angles()
+            except RuntimeError:
+                return None
+
+        self.mc.send_angles(target, speed)
+        cur = None
+        for rnd in range(max(1, tries)):
+            time.sleep(settle)
+            cur = _read()
+            if cur is None:
+                continue
+            laggards = [i for i in range(6) if abs(cur[i] - target[i]) > tol]
+            if not laggards:
+                return {"reached": True, "rounds": rnd,
+                        "max_error": max(abs(cur[i] - target[i]) for i in range(6)),
+                        "angles": cur}
+            for i in laggards:                       # re-send only the stragglers
+                self.mc.send_angle(i + 1, target[i], speed)
+        cur = _read() or cur
+        maxerr = (max(abs(cur[i] - target[i]) for i in range(6))
+                  if cur is not None else None)
+        return {"reached": bool(maxerr is not None and maxerr <= tol),
+                "rounds": tries, "max_error": maxerr, "angles": cur}
+
+    def home_position(self, speed: int = 50) -> dict:
+        """Move all joints to home position (0 degrees), reliably (verify+retry)."""
+        return self.move_all_joints_safe([0, 0, 0, 0, 0, 0], speed)
 
     def joint_jog(self, joint_num: int, direction: int, speed: int = 50,
                   increment: float = 5.0) -> float:
@@ -831,7 +877,7 @@ class MyCobotJointController:
         q = self.solve_topdown_ik(x, y, z, current_angles=current_angles)
         if q is None:
             return None
-        self.mc.send_angles(q, speed)
+        self.move_all_joints_safe(q, speed)   # verify+retry: flaky multi-joint delivery
         return q
 
     def solve_topdown_ik(self, x: float, y: float, z: float,
