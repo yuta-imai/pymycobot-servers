@@ -93,7 +93,13 @@ def collect_records(controller, source, pset: List[List[float]], *,
     for i, p in enumerate(pset):
         if should_abort is not None and should_abort():
             raise RuntimeError("calibration aborted")
-        controller.mc.send_angles(list(p), speed)
+        # verify+retry per-joint delivery: raw send_angles intermittently reaches
+        # only SOME servos (partial execution), which silently drops poses from
+        # the fit via the cmd-vs-readback gate. move_all_joints_safe blocks.
+        try:
+            controller.move_all_joints_safe(list(p), speed)
+        except Exception:
+            controller.mc.send_angles(list(p), speed)   # last resort, old path
         time.sleep(settle)
         try:
             angles = [round(a, 2) for a in controller.get_all_joint_angles()]
@@ -165,10 +171,13 @@ def run_calibration(controller, *, model_path: str = DEFAULT_MODEL_PATH,
 
     if park:
         try:
-            controller.mc.send_angles([0, 0, 0, 0, 0, 0], speed)
-            time.sleep(2.0)
+            controller.home_position(speed)   # safe per-joint verify+retry path
         except Exception:
-            pass
+            try:
+                controller.mc.send_angles([0, 0, 0, 0, 0, 0], speed)
+                time.sleep(2.0)
+            except Exception:
+                pass
 
     return {
         "poses_total": len(pset),
