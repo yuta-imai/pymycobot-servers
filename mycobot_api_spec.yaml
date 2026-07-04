@@ -638,6 +638,30 @@ paths:
               schema:
                 $ref: '#/components/schemas/CalibrateWristStatus'
 
+  /robot/calibrate_wrist/model:
+    get:
+      tags:
+        - robot
+      summary: Get the fitted corrected wrist model
+      description: >-
+        Return the corrected_model.json fitted by the last wrist calibration on
+        this host, so a brain-side client can sync its local FK/IK model copy.
+      operationId: get_calibrate_wrist_model
+      responses:
+        '200':
+          description: The corrected wrist model (dh/signs/orient_err_deg/...)
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '404':
+          description: No model fitted on this host yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /robot/status:
     get:
       tags:

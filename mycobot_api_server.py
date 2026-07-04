@@ -1037,6 +1037,25 @@ async def calibrate_wrist_status():
     return {**_calib_state, "timestamp": get_current_timestamp()}
 
 
+@app.get("/robot/calibrate_wrist/model", tags=["robot"])
+async def get_wrist_model():
+    """Return the fitted corrected wrist model (corrected_model.json).
+
+    Lets the brain-side vision stack sync its local copy after an API-driven
+    calibration, so brain FK/IK and the Pi controller agree on the same model.
+    """
+    import json as _json
+    import os as _os
+    path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                         "scripts", "wrist_calib", "corrected_model.json")
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="no corrected_model.json on this host — run "
+                                   "POST /robot/calibrate_wrist first")
+    with open(path) as f:
+        return _json.load(f)
+
+
 @app.post("/robot/coords/check", response_model=ReachableResponse, tags=["robot"])
 async def check_coords_reachable(request: CoordsRequest):
     """Check, WITHOUT moving, whether a Cartesian pose is reachable (firmware IK)."""
