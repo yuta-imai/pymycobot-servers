@@ -74,6 +74,83 @@ def grab_rtsp(url: str, *, warmup: int = 5, timeout_s: float = 10.0) -> np.ndarr
 _COVERAGE_BASE = {"jp": "https://api.soracom.io", "g": "https://g.api.soracom.io"}
 
 
+def _soracom_auth(auth_key_id: str = "", auth_key: str = "", coverage: str = ""):
+    """Authenticate against the SORACOM API; return (base_url, auth_headers)."""
+    import json
+    import urllib.request
+    auth_key_id = auth_key_id or os.environ.get("SORACOM_AUTH_KEY_ID", "")
+    auth_key = auth_key or os.environ.get("SORACOM_AUTH_KEY", "")
+    coverage = coverage or os.environ.get("SORACOM_COVERAGE", "jp")
+    base = _COVERAGE_BASE.get(coverage)
+    if not (auth_key_id and auth_key and base):
+        raise RuntimeError("SORACOM auth needs SORACOM_AUTH_KEY_ID / SORACOM_AUTH_KEY "
+                           "(coverage jp/g)")
+    req = urllib.request.Request(
+        base + "/v1/auth",
+        data=json.dumps({"authKeyId": auth_key_id, "authKey": auth_key,
+                         "tokenTimeoutSeconds": 3600}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        auth = json.loads(r.read())
+    return base, {"X-Soracom-API-Key": auth["apiKey"], "X-Soracom-Token": auth["token"]}
+
+
+def get_soracom_live_url(*, device_id: str = "", auth_key_id: str = "",
+                         auth_key: str = "", coverage: str = "") -> str:
+    """Request a live-view streaming URL for a SORACAM device from credentials.
+
+    Uses the sora_cam stream API (the same call the soracam MCP live-view tool
+    makes). The returned DASH/HLS URL is SHORT-LIVED — fetch right before use and
+    re-fetch on expiry. Tries the known endpoint shapes and extracts the first
+    playable URL from the response.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+    device_id = device_id or os.environ.get("SORACOM_DEVICE_ID", "")
+    if not device_id:
+        raise RuntimeError("get_soracom_live_url needs SORACOM_DEVICE_ID")
+    base, hdr = _soracom_auth(auth_key_id, auth_key, coverage)
+
+    def _call(method, path, body):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(base + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json", **hdr})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read() or "{}")
+
+    def _find_urls(obj):
+        out = []
+        if isinstance(obj, dict):
+            for v in obj.values():
+                out += _find_urls(v)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                out += _find_urls(v)
+        elif isinstance(obj, str) and obj.startswith("http"):
+            out.append(obj)
+        return out
+
+    last_err = None
+    for method, path, body in (
+            ("POST", f"/v1/sora_cam/devices/{device_id}/stream", {}),
+            ("GET", f"/v1/sora_cam/devices/{device_id}/stream", None)):
+        try:
+            resp = _call(method, path, body)
+        except urllib.error.HTTPError as e:
+            last_err = f"{method} {path} -> {e.code}"
+            continue
+        urls = _find_urls(resp)
+        if urls:
+            # prefer a manifest the cv2/ffmpeg backend can open directly
+            for u in urls:
+                if ".mpd" in u or ".m3u8" in u:
+                    return u
+            return urls[0]
+        last_err = f"{method} {path} -> no URL in response"
+    raise RuntimeError(f"could not obtain a SORACAM live URL ({last_err})")
+
+
 def grab_soracom_still(*, device_id: str = "", auth_key_id: str = "",
                        auth_key: str = "", coverage: str = "",
                        retries: int = 8, retry_wait_s: float = 3.0) -> np.ndarray:

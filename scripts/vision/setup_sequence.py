@@ -160,19 +160,47 @@ def grab_frame(args) -> "np.ndarray":
     return grab(backend=args.backend, url=args.url)
 
 
+def resolve_stream_url(args, force: bool = False) -> Optional[str]:
+    """Ensure args.url holds a live stream URL when possible.
+
+    Explicit --url wins; otherwise, with SORACOM credentials in the environment
+    (.soracom.env is auto-loaded by config), fetch a live-view URL from the API.
+    Live URLs are short-lived, so this is also called to REFRESH after a failure.
+    """
+    if args.url and not force:
+        return args.url
+    if os.environ.get("SORACOM_AUTH_KEY_ID") and os.environ.get("SORACOM_DEVICE_ID"):
+        from frame_source import get_soracom_live_url
+        try:
+            args.url = get_soracom_live_url()
+            print(f"  [stream] live URL fetched from SORACOM API")
+            return args.url
+        except RuntimeError as e:
+            print(f"  [stream] auto-fetch failed ({e}); falling back to stills")
+            args.url = None
+    return args.url
+
+
 def marker_read(args, H: np.ndarray, pre_xy: Optional[Sequence[float]]) -> Dict[str, Any]:
     """Trustworthy gripper-marker board-XY after a move.
 
     With a stream URL: reuse repeatability.measure_stable (movement + distinct-frame
-    + stability gates — defeats stale/duplicate frames). With the still backend:
-    settle sleep + single still (each still is freshly captured server-side).
+    + stability gates — defeats stale/duplicate frames); on a dead/expired stream
+    the URL is re-fetched once from credentials. With the still backend: settle
+    sleep + single still (each still is freshly captured server-side).
     """
     if args.url:
         import repeatability as rp  # lazy: loads kinematics AFTER wrist sync
         ns = SimpleNamespace(stream_drain=2, stable_frames=4, stable_tol_mm=1.0,
                              stable_min_window_s=0.8, stable_timeout_s=10.0,
                              read_interval_s=0.15, move_min_mm=3.0)
-        return rp.measure_stable(args.url, H, ns, pre_xy=pre_xy)
+        try:
+            return rp.measure_stable(args.url, H, ns, pre_xy=pre_xy)
+        except RuntimeError:
+            if resolve_stream_url(args, force=True):
+                return rp.measure_stable(args.url, H, ns, pre_xy=pre_xy)
+    if args.backend == "rtsp" and not args.url:
+        return {"ok": False, "stable": False, "reason": "no_stream_url"}
     from gripper_marker import marker_board_xy
     time.sleep(args.settle_s)
     frame = grab_frame(args)
@@ -534,7 +562,8 @@ def main() -> None:
     ap.add_argument("--settle-s", type=float, default=2.0,
                     help="still-backend settle before a marker read")
     # wrist
-    ap.add_argument("--wrist-pose-set", default="standard")
+    ap.add_argument("--wrist-pose-set", default="default",
+                    choices=["default", "quick"])
     ap.add_argument("--wrist-timeout-s", type=float, default=1800.0)
     # homography/touch
     ap.add_argument("--n-touch", type=int, default=6)
@@ -557,7 +586,11 @@ def main() -> None:
 
     api = Api(args.host, args.port)
     state = load_state()
-    print(f"setup sequence: {' -> '.join(run)}")
+    resolve_stream_url(args)
+    if not args.url and not args.backend and os.environ.get("SORACOM_AUTH_KEY_ID"):
+        args.backend = "soracom"          # stills fallback from credentials
+    print(f"setup sequence: {' -> '.join(run)}   "
+          f"frames={'stream' if args.url else (args.backend or config.FRAME_SOURCE.backend)}")
     for stage in run:
         try:
             result = STAGE_FN[stage](api, args, state)
