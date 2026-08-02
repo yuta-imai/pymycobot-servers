@@ -82,19 +82,42 @@ def write_reg(mc, sid, addr, value):
     return False
 
 
+def plausible(v):
+    """Is this a real register byte, or an error sentinel?
+
+    pymycobot signals a failed read by RETURNING -1, not by raising or
+    returning None. Counting that as an answer is how a bus with one servo
+    attached reported six: every absent ID answered -1, identically, which a
+    naive "not None and consistent" test reads as a healthy stable servo.
+    """
+    return isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 255
+
+
 def probe(mc, sid, repeats=READ_REPEATS):
-    """Classify one ID: absent / stable / unstable (= likely a collision)."""
+    """Classify one ID from its own ID register.
+
+    A servo addressed at ID n necessarily holds n at ADDR_ID -- that is what
+    being ID n means. So the read must come back equal to sid to count as a
+    presence. Anything else is a sentinel, bus noise, or a wiring surprise, and
+    none of those are 'a servo is here'.
+
+    Returns one of:
+      absent    no plausible reply
+      present   consistent, and equal to sid
+      unstable  plausible but varying / intermittent -> two servos on one ID
+      mismatch  consistent but != sid -> answering, but not who we addressed
+    """
     reads = []
     for _ in range(repeats):
         reads.append(read_reg(mc, sid, ADDR_ID))
         time.sleep(0.05)
 
-    good = [r for r in reads if r is not None]
+    good = [r for r in reads if plausible(r)]
     if not good:
         return "absent", reads
     if len(set(good)) > 1 or len(good) != repeats:
         return "unstable", reads
-    return "stable", reads
+    return ("present" if good[0] == sid else "mismatch"), reads
 
 
 def scan(mc, verbose=True):
@@ -109,12 +132,17 @@ def scan(mc, verbose=True):
         if verbose:
             mark = {
                 "absent": "応答なし",
-                "stable": "応答あり",
+                "present": "応答あり",
                 "unstable": "応答が不安定  <-- 同一IDに複数台いる疑い",
+                "mismatch": "応答したがIDが一致しない  <-- サーボではない可能性",
             }[state]
             print(f"  ID {sid}: {mark}  reads={reads}")
     if verbose:
-        print(f"\n応答したID: {sorted(found) or 'なし'}  (計 {len(found)} 台)")
+        present = [i for i, (s, _) in found.items() if s == "present"]
+        print(f"\n応答したID: {sorted(present) or 'なし'}  (計 {len(present)} 台)")
+        if len(found) != len(present):
+            other = sorted(set(found) - set(present))
+            print(f"判定不能なID: {other}  (reads を見て判断してください)")
     return found
 
 
@@ -141,6 +169,8 @@ def set_id(mc, old, new, force, skip_lock):
     found = scan(mc)
 
     # Gate 1: exactly one servo on the bus. This is the whole safety argument.
+    # Counts responders of ANY state, not just clean ones: an ID we cannot
+    # classify is a possible servo, and possible servos block the write.
     if len(found) != 1 or old not in found:
         print(
             f"\n中止: バス上に {len(found)} 台 (ID {sorted(found)}) 見えています。\n"
@@ -152,11 +182,15 @@ def set_id(mc, old, new, force, skip_lock):
             return 1
         print("\n--force が指定されています。ゲートを飛ばします。")
 
-    # Gate 2: an unstable read means two servos are already answering here.
-    if old in found and found[old][0] == "unstable" and not force:
+    # Gate 2: the one responder must be cleanly identified as ID `old`.
+    # Unstable = two servos answering here; mismatch = not the servo we think.
+    if old in found and found[old][0] != "present" and not force:
+        state, reads = found[old]
         print(
-            f"\n中止: ID {old} の応答が不安定です。まだ複数台が同じIDで応答しています。\n"
-            f"物理的に1台だけにしてから実行してください。"
+            f"\n中止: ID {old} の状態が「{state}」です (reads={reads})。\n"
+            f"  unstable -> まだ複数台が同じIDで応答しています。物理的に1台だけにしてください。\n"
+            f"  mismatch -> 応答はあるがIDレジスタが一致しません。--dump {old} で確認してください。\n"
+            f"確実に同定できない相手にIDを書き込むことはしません。"
         )
         return 1
 
@@ -199,7 +233,7 @@ def set_id(mc, old, new, force, skip_lock):
     print(f"  新ID {new}: {new_state}  reads={new_reads}")
     print(f"  旧ID {old}: {old_state}  reads={old_reads}")
 
-    if new_state == "stable" and old_state == "absent":
+    if new_state == "present" and old_state == "absent":
         print(f"\n成功: サーボは ID {new} で応答し、ID {old} は消えました。")
         print(
             "\n次にやること:\n"
@@ -274,12 +308,22 @@ def main():
     found = scan(mc)
     missing = [i for i in SCAN_IDS if i not in found]
     unstable = [i for i, (s, _) in found.items() if s == "unstable"]
+    mismatch = [i for i, (s, _) in found.items() if s == "mismatch"]
     if unstable:
         print(f"\nID {unstable} の応答が不安定です。同じIDに複数台いる可能性が高い。")
+    if mismatch:
+        print(f"ID {mismatch} は応答しましたがIDレジスタが一致しません。--dump で中身を確認してください。")
     if missing:
         print(f"ID {missing} が不在です。そのIDのサーボが別のIDを名乗っているか、繋がっていません。")
-    if not missing and not unstable:
+    if not missing and not unstable and not mismatch:
         print("\nID 1..6 がすべて正常に応答しています。")
+
+    print(
+        "\n注意: pymycobot はサーボと直接ではなく腕のコントローラ経由で会話します。"
+        "コントローラが実際にバスへ問い合わせず自分の状態から答える場合、"
+        "この結果は物理的な接続を反映しません。実装が信用できるかは、"
+        "1台だけ繋いだ状態の出力と全台繋いだ状態の出力を比べれば分かります。"
+    )
     return 0
 
 

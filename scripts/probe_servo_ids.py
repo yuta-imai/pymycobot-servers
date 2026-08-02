@@ -72,7 +72,10 @@ def probe_enable(mc):
         elif v == 0:
             note = "応答なし  <-- ここにサーボがいない"
         else:
-            note = f"不定 (戻り値 {v})"
+            # pymycobot returns -1 on a failed read rather than raising. Only
+            # an explicit 1 means present; everything else is undecided, and
+            # must NOT be silently folded into "not missing".
+            note = f"判定不能 (戻り値 {v})  <-- 読み取り失敗の可能性"
         print(f"  ID {i}  {JOINT_NAMES[i]:<16} -> {str(v):<6} {note}")
     return seen
 
@@ -96,9 +99,11 @@ def probe_id_register(mc, repeats=3):
             reads.append(v if ok else None)
             time.sleep(0.05)
 
-        distinct = {r for r in reads if r is not None}
+        # A register byte is 0..255. pymycobot returns -1 on a failed read, so
+        # anything outside that range is an error sentinel, not an answer.
+        distinct = {r for r in reads if isinstance(r, int) and not isinstance(r, bool) and 0 <= r <= 255}
         if not distinct:
-            note = "応答なし"
+            note = f"応答なし（読み値 {reads} はすべてエラー値）"
         elif len(distinct) > 1:
             note = "読むたびに違う  <-- 複数のサーボが同時に返答している疑い"
         elif reads.count(next(iter(distinct))) != repeats:
@@ -195,7 +200,19 @@ def main():
     print("\n" + "=" * 68)
     print("読み方")
     print("=" * 68)
+    present = [i for i, v in seen.items() if v == 1]
     missing = [i for i, v in seen.items() if v == 0]
+    undecided = [i for i, v in seen.items() if v not in (0, 1)]
+
+    if undecided:
+        # Never report health off a probe that did not actually answer.
+        print(
+            f"ID {undecided} は判定できませんでした（戻り値が 0/1 以外）。\n"
+            "  この結果から在/不在は結論できません。以下のどれかです:\n"
+            "   - is_servo_enable がこのファームウェアで機能していない\n"
+            "   - 読み取りがタイムアウトしている (pymycobot は失敗時に -1 を返します)\n"
+            f"  物理的な確認 (--limp-test) の方が確実です。"
+        )
     if missing:
         print(
             f"ID {missing} が応答していません。"
@@ -206,9 +223,17 @@ def main():
                 "  ID 2 が不在で、かつ J1 の指令で2関節動くなら、"
                 "新しいJ2サーボが ID 1 のまま出荷時設定である可能性が最も高い。"
             )
-    else:
+    if not missing and not undecided:
         print("1..6 すべて応答しています。ID衝突以外の原因（配線・キャリブレーション）を疑ってください。")
-    print("いずれの場合も、このスクリプトは ID を書き換えません。手順は応答を見てから決めてください。")
+    elif present:
+        print(f"応答が確認できたID: {present}")
+
+    print(
+        "\n注意: pymycobot はサーボと直接ではなく腕のコントローラ経由で会話します。"
+        "コントローラがバスに問い合わせず自分の状態から答えるなら、"
+        "どの読み取りも物理的な接続を反映しません。"
+    )
+    print("このスクリプトは ID を書き換えません。手順は応答を見てから決めてください。")
 
     if args.limp_test:
         limp_test(mc)
