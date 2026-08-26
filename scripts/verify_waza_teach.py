@@ -60,6 +60,13 @@ SNAP_DEG = 8.0
 # Sag beyond this means the servos cannot hold a hand-made pose.
 DROOP_DEG = 5.0
 
+# From mycobot_joint_controller.py. A reading outside these is a corrupt
+# frame, not a pose -- the joint cannot mechanically be there.
+JOINT_LIMITS = {
+    1: (-168, 168), 2: (-135, 135), 3: (-150, 150),
+    4: (-145, 145), 5: (-155, 160), 6: (-180, 180),
+}
+
 NEUTRAL = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 # The setup move must actually land near neutral, or the row that follows is
@@ -99,8 +106,31 @@ class Api:
         except urllib.error.URLError as e:
             raise RuntimeError(f"{method} {path} -> unreachable: {e.reason}") from None
 
-    def angles(self):
-        return self.call("GET", "/joints/angles")["angles"]
+    def angles(self, retries=2):
+        """Read the pose, rejecting readings the arm cannot physically hold.
+
+        A single corrupt serial frame surfaces as a joint angle outside its
+        mechanical limit (a run of this test saw J2 report -164.01 deg against
+        a +/-135 limit, with the arm demonstrably fine before and after). Left
+        alone, one bad frame is indistinguishable from a real failure -- so
+        re-read instead of reasoning about a value the joint cannot occupy.
+        """
+        for attempt in range(retries + 1):
+            angles = self.call("GET", "/joints/angles")["angles"]
+            bad = [
+                (i + 1, a)
+                for i, a in enumerate(angles)
+                if not (JOINT_LIMITS[i + 1][0] <= a <= JOINT_LIMITS[i + 1][1])
+            ]
+            if not bad:
+                return angles
+            print(
+                f"  ! 可動域外の読み {bad} — 読み直します "
+                f"({attempt + 1}/{retries + 1})",
+                file=sys.stderr,
+            )
+            time.sleep(0.2)
+        return angles  # exhausted retries: hand it back, callers still check
 
     def move_all(self, angles, speed):
         return self.call("PUT", "/joints/angles", {"angles": angles, "speed": int(speed)})
