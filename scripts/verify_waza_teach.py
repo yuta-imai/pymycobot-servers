@@ -43,10 +43,17 @@ DEFAULT_SPEED = 40
 POSE_TIMEOUT = 15.0
 PLAYBACK_TOLERANCE = 2.0
 
-# Sampling schedule after power_on, in seconds. The first samples are as tight
-# as the serial round-trip allows: a snap-back to a stale target shows up
-# immediately, whereas gravity droop builds over seconds.
-HOLD_SAMPLES = (0.0, 0.3, 1.0, 2.0, 5.0, 10.0)
+# Sampling schedule, in seconds, measured from the moment power_on RETURNS.
+# power_on is a blocking HTTP call that takes on the order of a second, and
+# nothing can be read during it -- so the instant of re-engagement is not
+# observable from here. What IS observable is the aftermath: a servo that
+# re-engaged at a stale target STAYS there, so a first sample equal to the
+# captured pose rules that failure out even though the transient was missed.
+HOLD_SAMPLES = (0.0, 0.3, 1.0, 2.0)
+
+# Droop is sampled separately, after the operator lets go. While a human is
+# holding the arm up, a sag measurement says nothing about the servos.
+DROOP_SAMPLES = (0.0, 2.0, 5.0, 10.0)
 
 # A snap this large is a hazard, not a measurement.
 SNAP_DEG = 8.0
@@ -130,7 +137,17 @@ def confirm(prompt):
 
 
 def test_teach_and_hold(api, results):
-    """release -> pose by hand -> read -> power_on -> does it snap or sag?"""
+    """release -> pose by hand -> read -> power_on -> does it snap or sag?
+
+    Two separate questions, and they need different conditions to answer:
+
+      snap  - does re-engaging throw the arm out of the holder's hands? Asked
+              while they are still supporting it, because that is the moment
+              under test.
+      droop - can the servos hold a hand-made pose? Cannot be asked while a
+              human is holding the arm: they, not the servos, would be the
+              thing being measured. So we ask them to let go first.
+    """
     print("\n" + "=" * 72)
     print("TEST A: 手で教えたポーズを保持できるか (captureCurrentPose の前提)")
     print("=" * 72)
@@ -146,6 +163,10 @@ def test_teach_and_hold(api, results):
     print("サーボを解放しました。手で形を作ってください（腕は支えたまま）。")
 
     captured = None
+    samples = []
+    droop = []
+    hands_off = False
+    power_on_s = float("nan")
     try:
         if not confirm("形ができたら続けてください（腕はまだ離さない）"):
             results.append(("A", "SKIP", "操作者が中止"))
@@ -155,15 +176,44 @@ def test_teach_and_hold(api, results):
         print(f"\n記録した角度  {fmt(captured)}")
         print("サーボを入れなおします。腕はまだ支えたままにしてください。")
 
-        t0 = time.monotonic()
+        # Time the call itself: it is a blind window, and its length is the
+        # honest bound on how fast this test can possibly see anything.
+        t_call = time.monotonic()
         api.power_on()
+        power_on_s = time.monotonic() - t_call
 
-        samples = []
+        t0 = time.monotonic()  # sampling starts when power_on RETURNS
         for target_t in HOLD_SAMPLES:
             while time.monotonic() - t0 < target_t:
                 time.sleep(0.01)
-            t = time.monotonic() - t0
-            samples.append((t, api.angles()))
+            samples.append((time.monotonic() - t0, api.angles()))
+
+        print(f"\npower_on() の所要 {power_on_s:.2f}s （この間は読めません）")
+        print(f"{'経過':>6}  {'角度':<56} {'最大ずれ':>10}")
+        for t, ang in samples:
+            j, d = worst(deltas(ang, captured))
+            print(f"{t:5.2f}s  {fmt(ang)}  J{j} {d:+6.2f}°")
+
+        snap_j, snap_d = worst(deltas(samples[0][1], captured))
+        if abs(snap_d) >= SNAP_DEG:
+            print("\n跳ねを検出しました。手を離す段階には進みません。")
+        else:
+            print(
+                "\n次はサーボの保持力を測ります。手を離す必要があります。"
+                "\n（支えたままだと、測れるのは手の安定性であってサーボではありません）"
+            )
+            hands_off = confirm("腕から手を離してください。離したら続けてください")
+            if hands_off:
+                t1 = time.monotonic()
+                for target_t in DROOP_SAMPLES:
+                    while time.monotonic() - t1 < target_t:
+                        time.sleep(0.01)
+                    droop.append((time.monotonic() - t1, api.angles()))
+
+                print(f"\n{'経過':>6}  {'角度':<56} {'最大ずれ':>10}")
+                for t, ang in droop:
+                    j, d = worst(deltas(ang, captured))
+                    print(f"{t:5.2f}s  {fmt(ang)}  J{j} {d:+6.2f}°")
     finally:
         # Same guarantee as captureCurrentPose(): never leave the arm limp.
         try:
@@ -171,35 +221,43 @@ def test_teach_and_hold(api, results):
         except Exception as e:  # noqa: BLE001 - report, never mask the test result
             print(f"!! サーボ再投入に失敗: {e}", file=sys.stderr)
 
-    print(f"\n{'経過':>6}  {'角度':<56} {'最大ずれ':>10}")
-    for t, ang in samples:
-        j, d = worst(deltas(ang, captured))
-        print(f"{t:5.2f}s  {fmt(ang)}  J{j} {d:+6.2f}°")
+    if not samples:
+        results.append(("A", "SKIP", "サンプルが取れませんでした"))
+        return captured
 
     snap_j, snap_d = worst(deltas(samples[0][1], captured))
-    settle_j, settle_d = worst(deltas(samples[-1][1], captured))
 
     print()
     if abs(snap_d) >= SNAP_DEG:
         verdict = (
             "FAIL",
-            f"power_on 直後に J{snap_j} が {snap_d:+.2f}° 跳ねた。"
-            f"古い目標値へスナップしている疑い — 子どもが腕を持ったまま起きると危険。"
+            f"power_on 復帰直後に J{snap_j} が {snap_d:+.2f}° ずれています。"
+            f"古い目標値へスナップした疑い — 子どもが腕を持ったまま起きると危険。"
             f"save_waza を使わせる前に、power_on 前へ現在角度を送り込む修正が必要。",
         )
-    elif abs(settle_d) >= DROOP_DEG:
+    elif not hands_off:
         verdict = (
-            "FAIL",
-            f"{samples[-1][0]:.0f} 秒後に J{settle_j} が {settle_d:+.2f}° 垂れた。"
-            f"手で作ったポーズをサーボが保持できていない。"
-            f"腕を下げ気味のポーズだけに限るか、教える姿勢を見直すこと。",
+            "PARTIAL",
+            f"スナップは検出されませんでした (J{snap_j} {snap_d:+.2f}°、"
+            f"power_on の所要 {power_on_s:.2f}s)。"
+            f"ただし手を離していないため、サーボの保持力は未測定です。",
         )
     else:
-        verdict = (
-            "PASS",
-            f"スナップ J{snap_j} {snap_d:+.2f}° / {samples[-1][0]:.0f}秒後 "
-            f"J{settle_j} {settle_d:+.2f}° — どちらも許容内。教える手順はそのまま使える。",
-        )
+        droop_j, droop_d = worst(deltas(droop[-1][1], captured))
+        if abs(droop_d) >= DROOP_DEG:
+            verdict = (
+                "FAIL",
+                f"手を離してから {droop[-1][0]:.0f} 秒で J{droop_j} が {droop_d:+.2f}° 垂れました。"
+                f"手で作ったポーズをサーボが保持できていません。"
+                f"腕を下げ気味のポーズだけに限るか、教える姿勢を見直すこと。",
+            )
+        else:
+            verdict = (
+                "PASS",
+                f"スナップ J{snap_j} {snap_d:+.2f}° / "
+                f"手を離して {droop[-1][0]:.0f}秒後 J{droop_j} {droop_d:+.2f}° — "
+                f"どちらも許容内。教える手順はそのまま使える。",
+            )
 
     print(f"[{verdict[0]}] {verdict[1]}")
     results.append(("A", *verdict))
@@ -340,11 +398,20 @@ def main():
     print("まとめ")
     print("=" * 72)
     for name, status, note in results:
-        print(f"[{status:4}] {name}: {note}")
+        print(f"[{status:7}] {name}: {note}")
 
     failed = [r for r in results if r[1] == "FAIL"]
     if failed:
         print(f"\n{len(failed)} 件 FAIL。子どもに触らせる前に直してください。")
+        return 1
+
+    # PARTIAL is not a pass. It means the measurement was not actually taken,
+    # and reporting it as green is how an unverified assumption reaches a child.
+    partial = [r for r in results if r[1] == "PARTIAL"]
+    if partial:
+        print(f"\n{len(partial)} 件が測定未完了です。合格ではありません:")
+        for name, _, note in partial:
+            print(f"  - {name}: {note}")
         return 1
     if any(r[1] == "SKIP" for r in results):
         print("\nスキップあり。全項目を通してから本番に使ってください。")
