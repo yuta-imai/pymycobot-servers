@@ -10,3 +10,4 @@ scripts/vision/*.png
 scripts/vision/__pycache__/
 scripts/vision/*.pdf
 scripts/vision/.soracom.env
+mycobot_api_server.log
