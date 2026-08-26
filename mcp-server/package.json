@@ -1,12 +1,13 @@
 {
   "name": "@yuta-imai/mycobot-mcp-server",
-  "version": "0.1.0",
-  "description": "Model Context Protocol server for controlling a MyCobot arm via its REST API. Designed for Claude Desktop.",
+  "version": "0.2.0",
+  "description": "Model Context Protocol server for controlling a MyCobot arm via its REST API, including hand-taught motions (waza) exposed as tools. Designed for Claude Desktop.",
   "keywords": [
     "mcp",
     "model-context-protocol",
     "mycobot",
     "robotics",
+    "teaching",
     "claude"
   ],
   "license": "Apache-2.0",

@@ -91,7 +91,16 @@ This is a robotics project focused on MyCobot arm control and camera streaming u
 - **No code coupling**: Controls the robot only through the REST API over HTTP; the sole contract is `mycobot_api_spec.yaml`, consumed at build time via `openapi-typescript`
 - **Curated tools**: `get_robot_status`, `get_joint_angles`, `move_joint`, `move_all_joints`, `jog_joint`, `control_gripper`, `get_gripper_status`, `go_home`, `stop_robot`, `wait_for_movement`
 - **Input validation**: zod schemas enforce joint/speed/gripper limits before any request is sent
-- **Layout**: `src/api-client.ts` (typed HTTP wrapper), `src/tools.ts` (tool definitions), `src/server.ts` + `src/index.ts` (server + stdio entry), `src/generated/api-types.ts` (generated, committed)
+- **Layout**: `src/api-client.ts` (typed HTTP wrapper), `src/tools.ts` (tool definitions), `src/waza.ts` + `src/waza-tools.ts` (taught motions), `src/server.ts` + `src/index.ts` (server + stdio entry), `src/generated/api-types.ts` (generated, committed)
+
+### Waza (`mcp-server/src/waza.ts`, `src/waza-tools.ts`)
+- **Concept**: a *waza* is a hand-taught motion (freedrive pose capture) stored with a `setsumei` — a natural-language description of *when* to use it. The description is the LLM-facing contract; the angles are just data.
+- **Dynamic tools**: each waza is registered as its own MCP tool (`waza_<sha1(name)[:8]>`) whose description is the `setsumei`, so editing the sentence changes tool selection with no code change. `MYCOBOT_WAZA_DYNAMIC_TOOLS=false` falls back to `list_waza` + `do_waza` only.
+- **Hot reload**: `WazaStore` watches the file (and its parent directory, to survive editor save-by-rename) and re-syncs registered tools, emitting `notifications/tools/list_changed`.
+- **Durability**: writes go through a temp file + atomic rename; a file with any invalid entry still loads the good entries (bad ones reported, not dropped silently) and **write tools refuse to save** so a rewrite cannot discard them.
+- **Safety**: joint limits validated at load; playback clamps speed to ≥ 20 (J2 stalls under gravity below that) and aborts remaining poses on `stalled`/`timeout`, reporting the failing pose index.
+- **Teaching flow**: entirely conversational — `release_all_servos` → human poses the arm → `save_waza`. Pose capture re-engages the servos in a `finally`, so a failed save or a forgotten follow-up call can never leave the arm limp; `keep_relaxed: true` opts out when recording consecutive poses.
+- **Config**: `MYCOBOT_WAZA_FILE` (unset = feature off), `MYCOBOT_WAZA_SPEED`, `MYCOBOT_WAZA_POSE_TIMEOUT`, `MYCOBOT_WAZA_DYNAMIC_TOOLS`, `MYCOBOT_GRIPPER_TYPE`
 
 ### Key Features
 
