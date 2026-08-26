@@ -35,6 +35,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 # Matches waza-tools.ts: MIN_SAFE_SPEED, opts.defaultSpeed, opts.poseTimeout,
 # and the 2.0 deg tolerance passed to waitForMovement during playback.
@@ -75,14 +76,49 @@ SETUP_TOL = 3.0
 # Below this, the "move" had nowhere to go and says nothing about torque.
 MIN_TRAVEL_DEG = 5.0
 
-# From waza.example.json — the poses a child actually meets on day one. These
-# load J2/J3 the most, so they are the honest test of the speed floor.
-EXAMPLE_POSES = [
-    ("ばんざい", [0, -40, 20, 0, 90, 0]),
-    ("おじぎ (下)", [0, -50, 40, 0, 0, 0]),
-    ("てをふる (右)", [0, -30, 10, 0, 60, -30]),
-    ("てをふる (左)", [0, -30, 10, 0, 60, 30]),
-]
+DEFAULT_WAZA_FILE = Path(__file__).resolve().parent.parent / "waza.example.json"
+
+
+def load_waza_poses(path):
+    """Read the poses to sweep from the waza file the robot will actually play.
+
+    These used to be a literal copied out of waza.example.json -- which meant
+    the sweep kept testing fabricated angles after the file itself had been
+    re-taught from the arm, and no amount of fixing the file could reach the
+    test. Read the file, or sweep nothing: silently falling back to invented
+    poses is the failure this replaces.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print(f"技ファイルがありません: {path}")
+        print("  scripts/teach_waza.py で技を教えてから実行してください。")
+        return []
+    except (ValueError, OSError) as e:
+        print(f"技ファイルを読めません: {path}: {e}")
+        return []
+
+    entries = data.get("waza", []) if isinstance(data, dict) else data
+    out = []
+    for w in entries:
+        name = w.get("name", "?")
+        poses = w.get("poses") or ([{"angles": w["angles"]}] if "angles" in w else [])
+        for i, pose in enumerate(poses, 1):
+            angles = pose.get("angles")
+            if not (isinstance(angles, list) and len(angles) == 6):
+                print(f"  スキップ: 「{name}」のポーズ{i} の angles が不正です")
+                continue
+            bad = [
+                (j + 1, a) for j, a in enumerate(angles)
+                if not (JOINT_LIMITS[j + 1][0] <= a <= JOINT_LIMITS[j + 1][1])
+            ]
+            if bad:
+                # waza.ts drops these at load too, so sweeping them proves nothing.
+                print(f"  スキップ: 「{name}」のポーズ{i} が可動域外 {bad}")
+                continue
+            label = name if len(poses) == 1 else f"{name} (ポーズ{i})"
+            out.append((label, angles))
+    return out
 
 
 class Api:
@@ -410,7 +446,7 @@ def sweep_pose(api, label, target, speeds, results):
     return rows
 
 
-def test_speed_floor(api, taught, speeds, results):
+def test_speed_floor(api, taught, speeds, results, args_waza_file):
     print("\n" + "=" * 72)
     print("TEST B: 速度ごとの到達性 (MIN_SAFE_SPEED=20 / 既定 40 の妥当性)")
     print("=" * 72)
@@ -419,9 +455,15 @@ def test_speed_floor(api, taught, speeds, results):
         results.append(("B", "SKIP", "操作者が中止"))
         return []
 
-    poses = list(EXAMPLE_POSES)
+    poses = load_waza_poses(Path(args_waza_file))
+    if poses:
+        print(f"技ファイルから {len(poses)} ポーズを読みました: {args_waza_file}")
     if taught is not None:
         poses.insert(0, ("教えたポーズ", [round(a, 2) for a in taught]))
+    if not poses:
+        print("スイープする姿勢がありません。")
+        results.append(("B", "SKIP", "技ファイルが空か読めませんでした"))
+        return []
 
     rows = []
     try:
@@ -464,6 +506,10 @@ def main():
         default="20,30,40,50",
         help="TEST B で試す速度 (既定: 20,30,40,50)",
     )
+    p.add_argument(
+        "--waza-file", default=str(DEFAULT_WAZA_FILE),
+        help=f"TEST B がスイープする技ファイル (既定: {DEFAULT_WAZA_FILE.name})",
+    )
     args = p.parse_args()
 
     speeds = [int(s) for s in args.speeds.split(",") if s.strip()]
@@ -483,7 +529,7 @@ def main():
         if args.only != "b":
             taught = test_teach_and_hold(api, results)
         if args.only != "a":
-            test_speed_floor(api, taught, speeds, results)
+            test_speed_floor(api, taught, speeds, results, args.waza_file)
     except KeyboardInterrupt:
         print("\n中断されました。サーボを入れなおします。", file=sys.stderr)
         try:
