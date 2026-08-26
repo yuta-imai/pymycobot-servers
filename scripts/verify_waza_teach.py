@@ -62,6 +62,12 @@ DROOP_DEG = 5.0
 
 NEUTRAL = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
+# The setup move must actually land near neutral, or the row that follows is
+# measuring a different move than the one it reports.
+SETUP_TOL = 3.0
+# Below this, the "move" had nowhere to go and says nothing about torque.
+MIN_TRAVEL_DEG = 5.0
+
 # From waza.example.json — the poses a child actually meets on day one. These
 # load J2/J3 the most, so they are the honest test of the speed floor.
 EXAMPLE_POSES = [
@@ -267,9 +273,18 @@ def test_teach_and_hold(api, results):
 # --------------------------------------------------------------------- test B
 
 
-def run_pose(api, label, target, speed):
-    """Drive one pose exactly as playWaza does, and report what happened."""
+def run_pose(api, label, target, speed, start):
+    """Drive one pose exactly as playWaza does, and report what happened.
+
+    `start` is the measured pose the move begins from. Without it a row is
+    unreadable: wait_for_completion checks convergence on its FIRST poll, so a
+    move whose target is already within tolerance returns "converged" in 0.00s
+    having moved nothing -- and that is indistinguishable, in the reason and
+    error columns alone, from a move that succeeded.
+    """
     effective = max(MIN_SAFE_SPEED, speed)
+    travel = max(abs(t - s) for t, s in zip(target, start))
+
     api.move_all(target, effective)
     w = api.wait(target=target)
     reason = w.get("reason", "?")
@@ -278,17 +293,28 @@ def run_pose(api, label, target, speed):
     reached = api.angles()
     j, d = worst(deltas(reached, target))
 
+    # A move with nowhere to go proves nothing about torque at this speed.
+    noop = travel < MIN_TRAVEL_DEG
+    if noop:
+        status = "NOOP "
+    elif reason in ("stalled", "timeout"):
+        status = "STALL"
+    else:
+        status = "ok   "
+
     err = f"{max_error:5.2f}" if isinstance(max_error, (int, float)) else "  n/a"
-    status = "ok  " if reason not in ("stalled", "timeout") else "STALL"
     print(
         f"  speed {effective:3d}  {status} {reason:<9} "
-        f"{elapsed:5.2f}s  max_error {err}°  実測ずれ J{j} {d:+6.2f}°"
+        f"{elapsed:5.2f}s  移動量 {travel:6.2f}°  max_error {err}°  "
+        f"実測ずれ J{j} {d:+6.2f}°"
     )
     return {
         "label": label,
         "speed": effective,
         "reason": reason,
         "elapsed": elapsed,
+        "travel": travel,
+        "noop": noop,
         "max_error": max_error,
         "worst_joint": j,
         "worst_delta": d,
@@ -298,25 +324,59 @@ def run_pose(api, label, target, speed):
 def sweep_pose(api, label, target, speeds, results):
     print(f"\n--- {label}  target {fmt(target)}")
     rows = []
+    setup_failures = []
     for speed in speeds:
         # Approach from a common start so each speed sees the same load path.
         api.move_all(NEUTRAL, 50)
         api.wait(target=NEUTRAL)
-        rows.append(run_pose(api, label, target, speed))
+        start = api.angles()
 
-    bad = [r for r in rows if r["reason"] in ("stalled", "timeout")]
-    if not bad:
-        results.append(("B:" + label, "PASS", "全速度で到達"))
-    else:
-        floor = max(r["speed"] for r in bad)
+        # Verify the setup actually happened. An unchecked setup move is how a
+        # sweep reports four clean passes while the arm sat still the whole time.
+        sj, sd = worst(deltas(start, NEUTRAL))
+        if abs(sd) > SETUP_TOL:
+            print(
+                f"  speed {max(MIN_SAFE_SPEED, speed):3d}  SETUP 中立姿勢へ戻れず "
+                f"J{sj} が {sd:+.2f}° ずれたまま  ({fmt(start)})"
+            )
+            setup_failures.append(speed)
+            continue
+
+        rows.append(run_pose(api, label, target, speed, start))
+
+    stalled = [r for r in rows if r["reason"] in ("stalled", "timeout")]
+    noops = [r for r in rows if r["noop"]]
+
+    if setup_failures:
         results.append(
             (
                 "B:" + label,
                 "FAIL",
-                f"speed {', '.join(str(r['speed']) for r in bad)} で停止。"
+                f"speed {setup_failures} の前に中立姿勢へ戻れませんでした。"
+                f"この姿勢の到達性は測定できていません。",
+            )
+        )
+    elif stalled:
+        floor = max(r["speed"] for r in stalled)
+        results.append(
+            (
+                "B:" + label,
+                "FAIL",
+                f"speed {', '.join(str(r['speed']) for r in stalled)} で停止。"
                 f"MIN_SAFE_SPEED を {floor} より上へ（{floor + 10} 目安）上げる必要がある。",
             )
         )
+    elif noops:
+        results.append(
+            (
+                "B:" + label,
+                "PARTIAL",
+                f"speed {', '.join(str(r['speed']) for r in noops)} は移動量が "
+                f"{MIN_TRAVEL_DEG}° 未満で、トルクを試していません。",
+            )
+        )
+    else:
+        results.append(("B:" + label, "PASS", f"全速度で到達 (移動量 {rows[0]['travel']:.0f}°)"))
     return rows
 
 
@@ -345,10 +405,18 @@ def test_speed_floor(api, taught, speeds, results):
             print(f"!! 中立姿勢への復帰に失敗: {e}", file=sys.stderr)
 
     if rows:
-        ok_speeds = sorted({r["speed"] for r in rows if r["reason"] not in ("stalled", "timeout")})
+        # Only rows that actually travelled count as evidence about a speed.
+        proven = sorted({
+            r["speed"] for r in rows
+            if not r["noop"] and r["reason"] not in ("stalled", "timeout")
+        })
+        skipped = sorted({r["speed"] for r in rows if r["noop"]})
+        print(f"\n実際に移動して到達できた速度: {proven or 'なし'}")
+        if skipped:
+            print(f"移動量不足で未検証の速度: {skipped}")
         print(
-            f"\n到達できた速度: {ok_speeds or 'なし'} / "
-            f"既定 {DEFAULT_SPEED} は {'安全' if DEFAULT_SPEED in ok_speeds else '要見直し'}"
+            f"既定 {DEFAULT_SPEED} は "
+            f"{'安全' if DEFAULT_SPEED in proven else '未検証 — 上の行を確認してください'}"
         )
     return rows
 
