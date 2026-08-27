@@ -9,6 +9,7 @@ A comprehensive robotics control system for MyCobot arms with camera streaming a
 - **Camera Streaming**: RTSP video streaming from Raspberry Pi camera
 - **REST API**: HTTP-based remote control with OpenAPI specification
 - **MCP Server**: Control the arm from Claude Desktop and other MCP clients (see [`mcp-server/`](mcp-server/))
+- **Waza (技)**: Teach motions by hand and expose each one to an LLM as a tool described in the teacher's own words
 - **Safety Features**: Angle validation, joint limits, and emergency stops
 
 ## Installation
@@ -187,6 +188,40 @@ there is no code dependency on the Python code. It is published to npm and runs 
 See [`mcp-server/`](mcp-server/) for the full tool list, configuration, and development
 instructions.
 
+### 5. Waza: teaching motions by hand
+
+Set `MYCOBOT_WAZA_FILE` and the server also exposes **waza** — motions taught by
+posing the arm in freedrive, each stored with a plain-language description of when
+to use it. Every waza becomes its own MCP tool whose description *is* that
+sentence, so rewriting the sentence changes which requests the model matches it
+to, with no code change and no restart.
+
+```json
+{
+  "mcpServers": {
+    "mycobot": {
+      "command": "npx",
+      "args": [
+        "-y", "@yuta-imai/mycobot-mcp-server",
+        "--api-base-url", "http://localhost:8080",
+        "--waza-file", "~/mycobot/waza.json"
+      ]
+    }
+  }
+}
+```
+
+Teaching happens entirely in conversation: ask the person to support the arm,
+`release_all_servos`, let them pose it by hand, then `save_waza` — which records
+the angles and re-engages the servos automatically.
+
+The file format is documented in [`waza.example.json`](waza.example.json) and
+[`mcp-server/README.md`](mcp-server/README.md).
+
+> **Safety:** the arm sags the instant the servos release — warn and confirm
+> before releasing, not after. Playback clamps speed to ≥ 20 (J2 stalls under its
+> own weight below that) and aborts the remaining poses on a stall or timeout.
+
 ## API Reference
 
 ### REST API Endpoints
@@ -321,6 +356,7 @@ python -c "import cv2; cap = cv2.VideoCapture(0); print('Camera OK:', cap.isOpen
 ├── mycobot_api_server.py          # REST API server
 ├── mycobot_server_ctl.py          # Atomic start/stop wrapper for the API server
 ├── mycobot_server_ctl.sh          # Shell entry point (activates venv/pyenv, then runs the wrapper)
+├── waza.example.json               # Example taught-motion file
 ├── soracom-mcp-server/            # MCP server for SORACOM live APIs
 ├── mycobot_api_spec.yaml          # OpenAPI specification
 ├── mcp-server/                    # MCP server for Claude Desktop (Node/TypeScript)
